@@ -189,6 +189,41 @@ test('valid boundary values and whitespace normalization', async t => {
   assert.equal(item.goldReward, Number.MAX_SAFE_INTEGER);
 });
 
+test('text maxLength uses Unicode code points consistently on create and update', async t => {
+  const request = await setup(t);
+  const unicodeQuest = {
+    ...quest, title: '🐉'.repeat(200), description: '🧙'.repeat(5000),
+  };
+  const createdQuest = await request('/quests', 'POST', unicodeQuest);
+  assert.equal(createdQuest.status, 201);
+  const questItem = await createdQuest.json();
+  assert.equal(Array.from(questItem.title).length, 200);
+  assert.equal(Array.from(questItem.description).length, 5000);
+  assert.equal((await request(`/quests/${questItem.id}`, 'PUT', unicodeQuest)).status, 200);
+
+  const unicodeAdventurer = { ...adventurer, name: '🧝'.repeat(200) };
+  const createdAdventurer = await request('/adventurers', 'POST', unicodeAdventurer);
+  assert.equal(createdAdventurer.status, 201);
+  const adventurerItem = await createdAdventurer.json();
+  assert.equal(Array.from(adventurerItem.name).length, 200);
+  assert.equal((await request(
+    `/adventurers/${adventurerItem.id}`, 'PUT', unicodeAdventurer,
+  )).status, 200);
+
+  for (const [method, path, body] of [
+    ['POST', '/quests', { ...unicodeQuest, title: '🐉'.repeat(201) }],
+    ['POST', '/quests', { ...unicodeQuest, description: '🧙'.repeat(5001) }],
+    ['PUT', `/quests/${questItem.id}`, { ...unicodeQuest, title: '🐉'.repeat(201) }],
+    ['PUT', `/quests/${questItem.id}`, { ...unicodeQuest, description: '🧙'.repeat(5001) }],
+    ['POST', '/adventurers', { ...unicodeAdventurer, name: '🧝'.repeat(201) }],
+    ['PUT', `/adventurers/${adventurerItem.id}`, { ...unicodeAdventurer, name: '🧝'.repeat(201) }],
+  ]) {
+    const response = await request(path, method, body);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
+  }
+});
+
 test('each app starts with independent seed data', async t => {
   const first = await setup(t);
   const second = await setup(t);

@@ -9,7 +9,7 @@ const difficulties = ['easy', 'medium', 'hard', 'legendary'];
 const questStatuses = ['open', 'in-progress', 'completed'];
 const adventurerStatuses = ['active', 'inactive'];
 const text = max => value => typeof value === 'string'
-  && value.trim().length > 0 && value.length <= max;
+  && value.trim().length > 0 && Array.from(value).length <= max;
 const integer = min => value => Number.isSafeInteger(value) && value >= min;
 const member = values => value => values.includes(value);
 
