@@ -9,7 +9,7 @@ An Adventurers' Guild REST API for a developer bootcamp. It manages quests and
 adventurers in memory, starting with 10 quests and 5 adventurers. State resets on
 restart. The existing API needs no database, Azure credentials, or external
 services. An optional Microsoft Foundry model service is available for future
-consumers; it does not generate quests or expose a model HTTP endpoint.
+consumers and the local-only `POST /model/test` endpoint; it does not generate quests.
 
 Use [README.md](./README.md) for usage and
 [openapi.json](./openapi.json) for the HTTP contract. Follow the
@@ -26,7 +26,8 @@ changes. If scope or an intended contract change is unclear, ask before editing.
 Keep HTTP handling, business rules, storage, and external SDKs separate:
 
 * [src/api](./src/api) owns routing, JSON parsing, HTTP errors, and local Swagger
-  UI. Extend the HTTP application through `createApp({ services })`.
+  UI, including the model test route. Extend the HTTP application through
+  `createApp({ services })`.
 * [src/services.js](./src/services.js) is the composition root. Each
   `createServices()` call creates fresh seeded repositories and returns
   `{ guild, model }`.
@@ -113,7 +114,13 @@ validation.
 * Use [.env.example](./.env.example) only for non-secret configuration examples.
   Do not read, overwrite, or copy local `.env` values into code or documentation.
 * Do not introduce persistence, authentication, deployment infrastructure,
-  frameworks, or a public model endpoint unless the task calls for them.
+  frameworks, or additional model endpoints unless the task calls for them.
+  Keep `POST /model/test` local-only: it is unauthenticated, invokes billable
+  inference with at most 5000 input code points and a bounded output-token
+  limit (`MODEL_TEST_MAX_OUTPUT_TOKENS`, default 512, 16-4096), accepts only
+  loopback clients with a local `Host` header, allows at most two concurrent
+  model calls, and cancels the model call when the client disconnects. The
+  server binds to `127.0.0.1` unless `HOST` is set.
 
 ## Security constraints
 

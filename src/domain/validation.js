@@ -14,6 +14,9 @@ const integer = min => value => Number.isSafeInteger(value) && value >= min;
 const member = values => value => values.includes(value);
 
 const schemas = {
+  modelTest: {
+    input: text(5000),
+  },
   quests: {
     title: text(200),
     description: text(5000),

@@ -19,8 +19,10 @@ npm ci
 npm start
 ```
 
-The API listens at `http://localhost:3000`. Set `PORT` to change the port, for example
-`PORT=4000 npm start` on macOS/Linux. Stop it with Ctrl+C.
+The API listens at `http://localhost:3000` and accepts connections only from this
+computer (it binds to `127.0.0.1`). Set `PORT` to change the port, for example
+`PORT=4000 npm start` on macOS/Linux. Set `HOST` to bind to another interface;
+`POST /model/test` still accepts only local requests. Stop it with Ctrl+C.
 There is no compilation/build step. Run `npm ci` once after cloning to install
 the dependencies from the lockfile.
 
@@ -87,12 +89,84 @@ message or a sanitized diagnostic, never the model output, endpoint, or token.
 It exits nonzero on failure. Check the configuration, local login, role
 assignments, deployment availability, and network access if it fails. Model
 requests have a 30-second deadline and no automatic retries. This is a
-local development/demo command, not a public HTTP endpoint.
+local development/demo command.
+
+### Test through REST or Swagger
+
+After setting the same environment variables and running `npm start`, open
+`http://localhost:3000/docs` and use **POST /model/test**, or run in PowerShell:
+
+```powershell
+Invoke-RestMethod -Uri 'http://localhost:3000/model/test' -Method Post `
+  -ContentType 'application/json' `
+  -Body '{"input":"Reply with a short greeting."}'
+```
+
+The JSON response is `{ "text": "Hello, adventurer!" }` (actual text varies).
+The request must contain only `input`, a non-blank string of at most 5000 Unicode
+code points, measured before trimming. Responses are limited to 512 output tokens
+by default. Set `MODEL_TEST_MAX_OUTPUT_TOKENS` to an integer from 16 to 4096 to
+change the limit; reasoning models count reasoning tokens toward it. Requests that
+exhaust the limit and produce an incomplete response return an error, not partial
+text. The JSON-only policy and 64 KiB body limit apply.
+
+This endpoint invokes the configured model and incurs usage charges. It is
+unauthenticated and intended only for local testing. It returns 403 unless the
+request comes from a loopback address with a `localhost`, `127.0.0.1`, or `[::1]`
+`Host` header, which also blocks DNS-rebinding requests from web pages. At most
+two model calls run at once; additional requests return 429 with `Retry-After`.
+If the client disconnects, the server cancels the model call. When
+`AZURE_AI_MODEL_ENDPOINT` is set, the server prints a startup warning about this
+endpoint. Only the caller receives model text; the server does not log it.
+
+Errors use the standard envelope:
+
+| Status | Codes                                                                                         |
+|--------|-----------------------------------------------------------------------------------------------|
+| 500    | `CONFIGURATION_ERROR`, or `INTERNAL_ERROR` for unexpected failures                            |
+| 502    | `AUTHENTICATION_ERROR`, `MODEL_REQUEST_REJECTED`, `MODEL_NOT_FOUND`, `INVALID_MODEL_RESPONSE` |
+| 503    | `MODEL_UNAVAILABLE` (throttling, upstream server errors, or connection failures)              |
+| 504    | `MODEL_TIMEOUT`                                                                               |
+
+Configuration and model errors contain sanitized diagnostics; unexpected errors
+return a generic message. Other routes still work without Foundry configuration.
+
+### Troubleshoot model requests
+
+* For `MODEL_NOT_FOUND` (upstream HTTP 404), confirm that `AZURE_AI_MODEL_DEPLOYMENT`
+  matches the deployment name shown in Foundry, which may differ from the model
+  family, and that it belongs to the configured resource.
+* For `MODEL_REQUEST_REJECTED` (upstream HTTP 400/422), check the deployed model's
+  Responses API support and output-token requirements.
+* For `MODEL_UNAVAILABLE` connection failures, check DNS, TLS trust, proxy
+  settings, and network access.
+* Restart the server after changing environment settings; the model client
+  caches configuration after its first use.
+
+Do not disable TLS verification or enable SDK debug logging to diagnose problems.
+
+If Node's default connection fails with `ECONNRESET` while Windows curl works,
+test whether a certificate-verified TLS 1.2 connection succeeds. On an affected
+Windows connection, the following startup command was verified with a successful
+`POST /model/test` request:
+
+```powershell
+node --tls-max-v1.2 --env-file=.env .\src\server.js
+```
+
+This is a process-scoped workaround, not a required application setting.
+Certificate verification remains enabled. Investigate endpoint or network
+handling of newer TLS connections before making this a permanent startup option.
+Do not use `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
+### Use the model service in code
 
 Future application services should receive the `model` service as a dependency
 from the composition root (`createServices` in `src/services.js`) and call
 `await model.complete('Your input')`. It returns text and throws a
-`ModelServiceError` with a safe `code` and message on failure. To test a
+`ModelServiceError` with a safe `code` and message on failure. Pass
+`{ signal }` in the options to cancel a call, which then fails with
+`MODEL_CANCELLED`. To test a
 consumer without Azure, inject an object implementing `complete(input, options)`
 as `createServices({ modelService: fakeModel })`. The verification command uses
 the same abstraction; consumers do not need to import the SDK or handle tokens.
@@ -113,6 +187,7 @@ the existing API runs without it.
 | POST | `/adventurers` | 201, created adventurer and `Location` header |
 | PUT | `/adventurers/{id}` | 200, updated adventurer |
 | DELETE | `/adventurers/{id}` | 204, no body |
+| POST | `/model/test` | 200, object with model `text` |
 
 Filter quests using `status` and/or `difficulty`, for example:
 
@@ -181,9 +256,11 @@ Errors use this format (field details are included for invalid fields):
 }
 ```
 
-Status codes: 400 for invalid input/JSON/filters, 404 for missing routes or records,
-405 for unsupported resource methods (with `Allow`), 413 for oversized bodies,
-415 for unsupported content types, and 500 for unexpected errors.
+Status codes: 400 for invalid input/JSON/filters, 403 for non-local model test
+requests, 404 for missing routes or records, 405 for unsupported resource methods
+(with `Allow`), 413 for oversized bodies, 415 for unsupported content types,
+429 when too many model test calls are in progress, and 500 for unexpected errors.
+See the model test section for model-specific 5xx codes.
 
 ## OpenAPI documentation
 

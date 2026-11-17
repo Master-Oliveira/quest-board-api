@@ -79,7 +79,8 @@ test('client errors are classified without exposing raw error details', async ()
     [timeout, 'MODEL_TIMEOUT'],
     [Object.assign(new Error('private data'), { status: 401 }), 'AUTHENTICATION_ERROR'],
     [Object.assign(new Error('private data'), { status: 403 }), 'AUTHENTICATION_ERROR'],
-    [Object.assign(new Error('private data'), { status: 404 }), 'MODEL_UNAVAILABLE'],
+    [Object.assign(new Error('private data'), { status: 400 }), 'MODEL_REQUEST_REJECTED'],
+    [Object.assign(new Error('private data'), { status: 404 }), 'MODEL_NOT_FOUND'],
     [Object.assign(new Error('private data'), { status: 429 }), 'MODEL_UNAVAILABLE'],
     [Object.assign(new Error('private data'), { status: 503 }), 'MODEL_UNAVAILABLE'],
     [new Error('private data'), 'MODEL_UNAVAILABLE'],
@@ -132,6 +133,35 @@ test('real SDK sends a Responses request using Azure Identity without live Azure
   assert.equal(fetchMock.mock.calls.length, endpoints.length);
 });
 
+test('real SDK failures distinguish rejected requests, missing deployments, and connection failures safely', async t => {
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', async () => ({
+    token: 'test-token', expiresOnTimestamp: Date.now() + 3600000,
+  }));
+  let upstreamStatus;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    if (upstreamStatus === undefined) throw new TypeError('private connection details');
+    return new Response(JSON.stringify({
+      error: { code: 'private upstream code', message: 'private upstream details' },
+    }), { status: upstreamStatus, headers: { 'content-type': 'application/json' } });
+  });
+  t.after(() => { getToken.mock.restore(); fetchMock.mock.restore(); });
+  for (const [status, code, message] of [
+    [400, 'MODEL_REQUEST_REJECTED', /rejected the request \(HTTP 400\)/],
+    [422, 'MODEL_REQUEST_REJECTED', /rejected the request \(HTTP 422\)/],
+    [404, 'MODEL_NOT_FOUND', /HTTP 404.*exact deployment name/],
+    [undefined, 'MODEL_UNAVAILABLE', /No HTTP response.*DNS, TLS certificates, proxy/],
+  ]) {
+    upstreamStatus = status;
+    await assert.rejects(createFoundryModelService({ env }).complete('Hi'), error => {
+      assert.equal(error.code, code);
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /private|test-token|example\.test/);
+      return true;
+    });
+  }
+  assert.equal(fetchMock.mock.calls.length, 4);
+});
+
 test('Azure credential errors are sanitized', async t => {
   const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', async () => {
     throw new Error('private credential details');
@@ -156,6 +186,25 @@ test('deadline covers stalled requests and aborts the client', async () => {
   });
   await assert.rejects(service.complete('Hi'), { code: 'MODEL_TIMEOUT' });
   assert.equal(signal.aborted, true);
+});
+
+test('caller cancellation aborts the client request and skips already-cancelled calls', async () => {
+  let clientSignal;
+  const create = mock.fn((request, options) => {
+    clientSignal = options.signal;
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new OpenAI.APIUserAbortError()), { once: true });
+    });
+  });
+  const service = createFoundryModelService({ env, createClient: () => ({ responses: { create } }) });
+  const caller = new AbortController();
+  const pending = service.complete('Hi', { signal: caller.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  caller.abort();
+  await assert.rejects(pending, { code: 'MODEL_CANCELLED' });
+  assert.equal(clientSignal.aborted, true);
+  await assert.rejects(service.complete('Hi', { signal: AbortSignal.abort() }), { code: 'MODEL_CANCELLED' });
+  assert.equal(create.mock.calls.length, 1);
 });
 
 test('deadline covers stalled Azure authentication', async t => {
