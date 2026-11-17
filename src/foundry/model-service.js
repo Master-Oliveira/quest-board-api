@@ -28,7 +28,7 @@ function configuration(env) {
   return { endpoint: endpoint.replace(/\/+$/, ''), model };
 }
 
-function createFoundryModelService({ env = process.env, createClient = defaultClient } = {}) {
+function createFoundryModelService({ env = process.env, createClient = defaultClient, timeoutMs = 30000 } = {}) {
   let client;
   let model;
   return {
@@ -38,15 +38,25 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
       }
       const config = client ? undefined : configuration(env);
       let response;
+      const controller = new AbortController();
+      let timer;
       try {
         if (!client) {
           model = config.model;
           client = createClient(config.endpoint);
         }
-        response = await client.responses.create({
-          model, input,
-          ...(options.maxOutputTokens === undefined ? {} : { max_output_tokens: options.maxOutputTokens }),
-        });
+        response = await Promise.race([
+          client.responses.create({
+            model, input,
+            ...(options.maxOutputTokens === undefined ? {} : { max_output_tokens: options.maxOutputTokens }),
+          }, { signal: controller.signal }),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => {
+              controller.abort();
+              reject(new ModelServiceError('MODEL_TIMEOUT', 'The Foundry model request timed out. Try again.'));
+            }, timeoutMs);
+          }),
+        ]);
       } catch (error) {
         if (error instanceof ModelServiceError) throw error;
         if (error?.cause instanceof ModelServiceError) throw error.cause;
@@ -60,6 +70,8 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
           throw new ModelServiceError('MODEL_UNAVAILABLE', 'The Foundry model is temporarily unavailable. Try again.');
         }
         throw new ModelServiceError('MODEL_UNAVAILABLE', 'Unable to reach the Foundry model. Check the endpoint and deployment.');
+      } finally {
+        clearTimeout(timer);
       }
       if (response?.status !== 'completed' || typeof response.output_text !== 'string' || !response.output_text.trim()) {
         throw new ModelServiceError('INVALID_MODEL_RESPONSE', 'The Foundry model returned an incomplete or empty response.');
@@ -82,6 +94,7 @@ function defaultClient(endpoint) {
     },
     timeout: 30000,
     maxRetries: 0,
+    logLevel: 'off',
   });
 }
 

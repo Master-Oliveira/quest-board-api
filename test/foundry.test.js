@@ -125,3 +125,45 @@ test('Azure credential errors are sanitized', async t => {
     return true;
   });
 });
+
+test('deadline covers stalled requests and aborts the client', async () => {
+  let signal;
+  const service = createFoundryModelService({
+    env, timeoutMs: 10,
+    createClient: () => ({ responses: { create: (request, options) => {
+      signal = options.signal;
+      return new Promise(() => {});
+    } } }),
+  });
+  await assert.rejects(service.complete('Hi'), { code: 'MODEL_TIMEOUT' });
+  assert.equal(signal.aborted, true);
+});
+
+test('deadline covers stalled Azure authentication', async t => {
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', () => new Promise(() => {}));
+  t.after(() => getToken.mock.restore());
+  await assert.rejects(createFoundryModelService({ env, timeoutMs: 10 }).complete('Hi'),
+    { code: 'MODEL_TIMEOUT' });
+});
+
+test('SDK debug logging is disabled even when enabled in the environment', async t => {
+  const previous = process.env.OPENAI_LOG;
+  process.env.OPENAI_LOG = 'debug';
+  const logs = [];
+  const methods = ['debug', 'info', 'warn', 'error'].map(name =>
+    mock.method(console, name, (...args) => logs.push(args)));
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', async () => ({
+    token: 'test-token', expiresOnTimestamp: Date.now() + 3600000,
+  }));
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    new Response('private response body', { status: 503 }));
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENAI_LOG;
+    else process.env.OPENAI_LOG = previous;
+    methods.forEach(method => method.mock.restore());
+    getToken.mock.restore();
+    fetchMock.mock.restore();
+  });
+  await assert.rejects(createFoundryModelService({ env }).complete('Hi'), { code: 'MODEL_UNAVAILABLE' });
+  assert.deepEqual(logs, []);
+});

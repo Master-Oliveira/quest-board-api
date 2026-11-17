@@ -76,7 +76,7 @@ The command makes a small, billable model request and prints only a success
 message or a sanitized diagnostic, never the model output, endpoint, or token.
 It exits nonzero on failure. Check the configuration, local login, role
 assignments, deployment availability, and network access if it fails. Model
-requests have a 30-second SDK timeout and no automatic retries. This is a
+requests have a 30-second deadline and no automatic retries. This is a
 local development/demo command, not a public HTTP endpoint.
 
 Future application services should receive the `model` service as a dependency
