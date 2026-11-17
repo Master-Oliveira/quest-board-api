@@ -40,10 +40,14 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
       if (typeof input !== 'string' || !input.trim()) {
         throw new ModelServiceError('INVALID_INPUT', 'A non-empty input is required.');
       }
+      const { signal } = options;
+      const cancelled = () => new ModelServiceError('MODEL_CANCELLED', 'The model request was cancelled.');
+      if (signal?.aborted) throw cancelled();
       const config = client ? undefined : configuration(env);
       let response;
       const controller = new AbortController();
       let timer;
+      let cancel;
       try {
         if (!client) {
           model = config.model;
@@ -56,12 +60,18 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
           }, { signal: controller.signal }),
           new Promise((resolve, reject) => {
             timer = setTimeout(() => {
-              controller.abort();
               reject(new ModelServiceError('MODEL_TIMEOUT', 'The Foundry model request timed out. Try again.'));
+              controller.abort();
             }, timeoutMs);
+            cancel = () => {
+              reject(cancelled());
+              controller.abort();
+            };
+            signal?.addEventListener('abort', cancel, { once: true });
           }),
         ]);
       } catch (error) {
+        if (signal?.aborted) throw cancelled();
         if (error instanceof ModelServiceError) throw error;
         if (error?.cause instanceof ModelServiceError) throw error.cause;
         if (error instanceof OpenAI.APIConnectionTimeoutError || error?.name === 'AbortError') {
@@ -71,11 +81,11 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
           throw new ModelServiceError('AUTHENTICATION_ERROR', 'Azure authentication or model access failed. Check your identity and permissions.');
         }
         if (error?.status === 400 || error?.status === 422) {
-          throw new ModelServiceError('MODEL_UNAVAILABLE',
+          throw new ModelServiceError('MODEL_REQUEST_REJECTED',
             `Foundry rejected the request (HTTP ${error.status}). Check Responses API support and the output-token limit for the deployed model.`);
         }
         if (error?.status === 404) {
-          throw new ModelServiceError('MODEL_UNAVAILABLE',
+          throw new ModelServiceError('MODEL_NOT_FOUND',
             'Foundry returned HTTP 404. Check that AZURE_AI_MODEL_ENDPOINT is the resource hosting the deployment and AZURE_AI_MODEL_DEPLOYMENT is its exact deployment name, not just the model family.');
         }
         if (error?.status === 429 || error?.status >= 500) {
@@ -88,6 +98,7 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
         throw new ModelServiceError('MODEL_UNAVAILABLE', 'Unable to reach the Foundry model. Check the endpoint and deployment.');
       } finally {
         clearTimeout(timer);
+        if (cancel) signal?.removeEventListener('abort', cancel);
       }
       if (response?.status !== 'completed' || typeof response.output_text !== 'string' || !response.output_text.trim()) {
         throw new ModelServiceError('INVALID_MODEL_RESPONSE', 'The Foundry model returned an incomplete or empty response.');

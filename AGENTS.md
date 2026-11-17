@@ -115,8 +115,12 @@ validation.
   Do not read, overwrite, or copy local `.env` values into code or documentation.
 * Do not introduce persistence, authentication, deployment infrastructure,
   frameworks, or additional model endpoints unless the task calls for them.
-  Keep `POST /model/test` local-only: it is unauthenticated and invokes billable
-  inference with at most 5000 input code points and 128 output tokens.
+  Keep `POST /model/test` local-only: it is unauthenticated, invokes billable
+  inference with at most 5000 input code points and a bounded output-token
+  limit (`MODEL_TEST_MAX_OUTPUT_TOKENS`, default 512, 16-4096), accepts only
+  loopback clients with a local `Host` header, allows at most two concurrent
+  model calls, and cancels the model call when the client disconnects. The
+  server binds to `127.0.0.1` unless `HOST` is set.
 
 ## Security constraints
 

@@ -79,7 +79,8 @@ test('client errors are classified without exposing raw error details', async ()
     [timeout, 'MODEL_TIMEOUT'],
     [Object.assign(new Error('private data'), { status: 401 }), 'AUTHENTICATION_ERROR'],
     [Object.assign(new Error('private data'), { status: 403 }), 'AUTHENTICATION_ERROR'],
-    [Object.assign(new Error('private data'), { status: 404 }), 'MODEL_UNAVAILABLE'],
+    [Object.assign(new Error('private data'), { status: 400 }), 'MODEL_REQUEST_REJECTED'],
+    [Object.assign(new Error('private data'), { status: 404 }), 'MODEL_NOT_FOUND'],
     [Object.assign(new Error('private data'), { status: 429 }), 'MODEL_UNAVAILABLE'],
     [Object.assign(new Error('private data'), { status: 503 }), 'MODEL_UNAVAILABLE'],
     [new Error('private data'), 'MODEL_UNAVAILABLE'],
@@ -144,15 +145,15 @@ test('real SDK failures distinguish rejected requests, missing deployments, and 
     }), { status: upstreamStatus, headers: { 'content-type': 'application/json' } });
   });
   t.after(() => { getToken.mock.restore(); fetchMock.mock.restore(); });
-  for (const [status, message] of [
-    [400, /rejected the request \(HTTP 400\)/],
-    [422, /rejected the request \(HTTP 422\)/],
-    [404, /HTTP 404.*exact deployment name/],
-    [undefined, /No HTTP response.*DNS, TLS certificates, proxy/],
+  for (const [status, code, message] of [
+    [400, 'MODEL_REQUEST_REJECTED', /rejected the request \(HTTP 400\)/],
+    [422, 'MODEL_REQUEST_REJECTED', /rejected the request \(HTTP 422\)/],
+    [404, 'MODEL_NOT_FOUND', /HTTP 404.*exact deployment name/],
+    [undefined, 'MODEL_UNAVAILABLE', /No HTTP response.*DNS, TLS certificates, proxy/],
   ]) {
     upstreamStatus = status;
     await assert.rejects(createFoundryModelService({ env }).complete('Hi'), error => {
-      assert.equal(error.code, 'MODEL_UNAVAILABLE');
+      assert.equal(error.code, code);
       assert.match(error.message, message);
       assert.doesNotMatch(error.message, /private|test-token|example\.test/);
       return true;
@@ -185,6 +186,25 @@ test('deadline covers stalled requests and aborts the client', async () => {
   });
   await assert.rejects(service.complete('Hi'), { code: 'MODEL_TIMEOUT' });
   assert.equal(signal.aborted, true);
+});
+
+test('caller cancellation aborts the client request and skips already-cancelled calls', async () => {
+  let clientSignal;
+  const create = mock.fn((request, options) => {
+    clientSignal = options.signal;
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new OpenAI.APIUserAbortError()), { once: true });
+    });
+  });
+  const service = createFoundryModelService({ env, createClient: () => ({ responses: { create } }) });
+  const caller = new AbortController();
+  const pending = service.complete('Hi', { signal: caller.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  caller.abort();
+  await assert.rejects(pending, { code: 'MODEL_CANCELLED' });
+  assert.equal(clientSignal.aborted, true);
+  await assert.rejects(service.complete('Hi', { signal: AbortSignal.abort() }), { code: 'MODEL_CANCELLED' });
+  assert.equal(create.mock.calls.length, 1);
 });
 
 test('deadline covers stalled Azure authentication', async t => {

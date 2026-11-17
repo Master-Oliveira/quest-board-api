@@ -1,7 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 const { once } = require('node:events');
-const { createApp } = require('../src/api/app');
+const { createApp, isLocalRequest } = require('../src/api/app');
 const { createServices } = require('../src/services');
 const { ModelServiceError } = require('../src/foundry/model-service');
 const { InMemoryRepository } = require('../src/data/repository');
@@ -23,10 +24,11 @@ async function setup(t, options) {
     server.closeIdleConnections();
   }));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return (path, method = 'GET', body, headers = {}) => fetch(`${base}${path}`, {
+  return (path, method = 'GET', body, headers = {}, signal) => fetch(`${base}${path}`, {
     method,
     headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
 }
 
@@ -252,9 +254,10 @@ test('repository does not expose mutable internal records', () => {
 
 test('model test returns model text and forwards validated input with a bounded output', async t => {
   const calls = [];
-  const request = await setup(t, { services: createServices({ modelService: {
+  const services = createServices({ modelService: {
     complete: async (...args) => { calls.push(args); return 'Hello from Foundry!'; },
-  } }) });
+  } });
+  const request = await setup(t, { services, env: {} });
   for (const [path, input, expected] of [
     ['/model/test', '  Say hello  ', 'Say hello'],
     ['/model/test/', '\u{1F409}'.repeat(5000), '\u{1F409}'.repeat(5000)],
@@ -263,9 +266,105 @@ test('model test returns model text and forwards validated input with a bounded 
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /application\/json/);
     assert.deepEqual(await response.json(), { text: 'Hello from Foundry!' });
-    assert.deepEqual(calls.at(-1), [expected, { maxOutputTokens: 128 }]);
+    const [forwarded, options] = calls.at(-1);
+    assert.equal(forwarded, expected);
+    assert.equal(options.maxOutputTokens, 512);
+    assert.ok(options.signal instanceof AbortSignal);
   }
   assert.equal(calls.length, 2);
+  for (const value of ['16', ' 4096 ']) {
+    const configured = await setup(t, { services, env: { MODEL_TEST_MAX_OUTPUT_TOKENS: value } });
+    assert.equal((await configured('/model/test', 'POST', { input: 'Hi' })).status, 200);
+    assert.equal(calls.at(-1)[1].maxOutputTokens, Number(value));
+  }
+  for (const value of ['15', '4097', '1.5', '1e3', '-20', 'many']) {
+    assert.throws(() => createApp({ services, env: { MODEL_TEST_MAX_OUTPUT_TOKENS: value } }),
+      /MODEL_TEST_MAX_OUTPUT_TOKENS must be an integer between 16 and 4096/);
+  }
+});
+
+test('model test accepts only local clients and local Host names', async t => {
+  let calls = 0;
+  const server = createApp({ services: createServices({ modelService: {
+    complete: async () => { calls++; return 'Hello!'; },
+  } }) });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }));
+  const post = host => new Promise((resolve, reject) => {
+    const body = JSON.stringify({ input: 'Hi' });
+    const outgoing = http.request({
+      host: '127.0.0.1', port: server.address().port, path: '/model/test', method: 'POST',
+      headers: { Host: host, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, incoming => {
+      const chunks = [];
+      incoming.on('data', chunk => chunks.push(chunk));
+      incoming.on('end', () => resolve({
+        status: incoming.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+      }));
+    });
+    outgoing.on('error', reject);
+    outgoing.end(body);
+  });
+  for (const host of ['evil.example', 'evil.example:3000', '127.0.0.1.nip.io']) {
+    const response = await post(host);
+    assert.equal(response.status, 403);
+    assert.equal(response.body.error.code, 'FORBIDDEN');
+  }
+  assert.equal(calls, 0);
+  for (const host of ['localhost:3000', '127.0.0.1', '[::1]:3000']) {
+    assert.equal((await post(host)).status, 200);
+  }
+  assert.equal(calls, 3);
+  const remote = { socket: { remoteAddress: '192.0.2.10' }, headers: { host: 'localhost' } };
+  assert.equal(isLocalRequest(remote), false);
+  for (const host of [undefined, '']) {
+    assert.equal(isLocalRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { host } }), false);
+  }
+  assert.equal(isLocalRequest({ socket: { remoteAddress: '::1' }, headers: { host: 'localhost' } }), true);
+});
+
+test('model test limits concurrent model calls', async t => {
+  const pending = [];
+  const request = await setup(t, { services: createServices({ modelService: {
+    complete: () => new Promise(resolve => pending.push(resolve)),
+  } }) });
+  const first = request('/model/test', 'POST', { input: 'One' });
+  const second = request('/model/test', 'POST', { input: 'Two' });
+  while (pending.length < 2) await new Promise(resolve => setImmediate(resolve));
+  const rejected = await request('/model/test', 'POST', { input: 'Three' });
+  assert.equal(rejected.status, 429);
+  assert.equal(rejected.headers.get('retry-after'), '1');
+  assert.equal((await rejected.json()).error.code, 'TOO_MANY_REQUESTS');
+  assert.equal(pending.length, 2);
+  pending.forEach(resolve => resolve('Done'));
+  assert.deepEqual(await Promise.all([first, second].map(async response => (await response).status)), [200, 200]);
+  const next = request('/model/test', 'POST', { input: 'Four' });
+  while (pending.length < 3) await new Promise(resolve => setImmediate(resolve));
+  pending[2]('Done');
+  assert.equal((await next).status, 200);
+});
+
+test('model test cancels the model call when the client disconnects', async t => {
+  let started;
+  let cancelled;
+  const modelStarted = new Promise(resolve => { started = resolve; });
+  const modelCancelled = new Promise(resolve => { cancelled = resolve; });
+  const request = await setup(t, { services: createServices({ modelService: {
+    complete: (input, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        cancelled();
+        reject(new ModelServiceError('MODEL_CANCELLED', 'The model request was cancelled.'));
+      }, { once: true });
+      started();
+    }),
+  } }) });
+  const client = new AbortController();
+  const response = request('/model/test', 'POST', { input: 'Hi' }, {}, client.signal);
+  await modelStarted;
+  client.abort();
+  await assert.rejects(response, { name: 'AbortError' });
+  await modelCancelled;
 });
 
 test('model test rejects invalid requests before invoking the model', async t => {
@@ -308,6 +407,7 @@ test('model test translates safe model errors and hides unexpected failures', as
   } }) });
   for (const [code, status] of [
     ['CONFIGURATION_ERROR', 500], ['AUTHENTICATION_ERROR', 502],
+    ['MODEL_REQUEST_REJECTED', 502], ['MODEL_NOT_FOUND', 502],
     ['MODEL_UNAVAILABLE', 503], ['MODEL_TIMEOUT', 504], ['INVALID_MODEL_RESPONSE', 502],
   ]) {
     failure = new ModelServiceError(code, 'Safe model diagnostic.');

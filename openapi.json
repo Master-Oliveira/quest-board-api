@@ -10,7 +10,7 @@
     "/model/test": {
       "post": {
         "summary": "Test the Foundry model",
-        "description": "Local development only: unauthenticated, billable model call. Input is trimmed after validating its supplied length (Unicode code points). Output is limited to 128 tokens; incomplete responses fail instead of returning partial text. Uses a 30-second deadline with no retries.",
+        "description": "Local development only: unauthenticated, billable model call. Requests must come from a loopback address with a localhost, 127.0.0.1, or [::1] Host header. At most two model calls run at once. Input is trimmed after validating its supplied length (Unicode code points). Output is limited to 512 tokens by default (MODEL_TEST_MAX_OUTPUT_TOKENS, 16-4096); incomplete responses fail instead of returning partial text. Uses a 30-second deadline with no retries, and the model call is cancelled if the client disconnects.",
         "requestBody": {
           "required": true,
           "content": { "application/json": {
@@ -27,6 +27,10 @@
             } }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": {
+            "description": "FORBIDDEN: the request did not come from a local client and Host",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
           "405": {
             "description": "Only POST is allowed",
             "headers": { "Allow": { "schema": { "type": "string", "enum": ["POST"] } } },
@@ -34,16 +38,21 @@
           },
           "413": { "$ref": "#/components/responses/TooLarge" },
           "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "429": {
+            "description": "TOO_MANY_REQUESTS: two model calls are already in progress",
+            "headers": { "Retry-After": { "schema": { "type": "string", "example": "1" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
           "500": {
             "description": "CONFIGURATION_ERROR or unexpected INTERNAL_ERROR",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           },
           "502": {
-            "description": "AUTHENTICATION_ERROR or INVALID_MODEL_RESPONSE",
+            "description": "AUTHENTICATION_ERROR, MODEL_REQUEST_REJECTED, MODEL_NOT_FOUND, or INVALID_MODEL_RESPONSE",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           },
           "503": {
-            "description": "MODEL_UNAVAILABLE",
+            "description": "MODEL_UNAVAILABLE: temporary throttling, server, or connection failure",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           },
           "504": {
