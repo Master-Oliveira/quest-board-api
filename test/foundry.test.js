@@ -83,6 +83,14 @@ test('client errors are classified without exposing raw error details', async ()
       return true;
     });
   }
+  const service = createFoundryModelService({
+    env, createClient: () => { throw new Error('private data'); },
+  });
+  await assert.rejects(service.complete('Hi'), error => {
+    assert.equal(error.code, 'MODEL_UNAVAILABLE');
+    assert.doesNotMatch(error.message, /private data/);
+    return true;
+  });
 });
 
 test('real SDK sends a Responses request using Azure Identity without live Azure access', async t => {

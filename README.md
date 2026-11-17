@@ -2,7 +2,8 @@
 
 A small REST API for an Adventurers' Guild, designed for a developer bootcamp.
 Manage quests and adventurers using an in-memory store seeded with 10 fantasy
-quests and 5 adventurers. No database or external services are required.
+quests and 5 adventurers. No database or external services are required for
+the existing API. An optional Azure AI Foundry connection is available for future services.
 Swagger UI assets are installed locally through npm. Data resets whenever the
 process restarts.
 
@@ -33,6 +34,60 @@ node --test --test-name-pattern="CRUD" test/api.test.js
 ```
 
 Tests use Node's built-in runner and isolated servers on ephemeral local ports.
+
+## Azure AI Foundry connection
+
+The optional model service uses the OpenAI Responses API through a Microsoft
+Foundry project endpoint and Azure Identity's `DefaultAzureCredential`. It does
+not generate quests or change the existing API. You need a Foundry project and
+a deployed model that supports the Responses API and Microsoft Entra ID
+authentication. Model calls may incur charges.
+
+Set these environment variables (see `.env.example`):
+
+| Variable | Description |
+| --- | --- |
+| `AZURE_AI_PROJECT_ENDPOINT` | HTTPS project endpoint copied from the Foundry portal, in the form `https://<resource>.services.ai.azure.com/api/projects/<project>`, without `/openai/v1` |
+| `AZURE_AI_MODEL_DEPLOYMENT` | Name of the deployed model, not necessarily its base model name |
+
+Use only a trusted project endpoint: the application sends an Azure bearer token
+to it. Do not include credentials, query parameters, or a fragment in the URL.
+The application reads environment variables directly; it does not load `.env`
+files automatically.
+
+For local development, install the Azure CLI and sign in with `az login`. Select
+the appropriate subscription with `az account set --subscription <subscription>`
+if needed. Give the signed-in identity permission to invoke the deployment: for
+example, Microsoft documents **Cognitive Services User** at the Foundry resource
+scope for keyless model inference. See the [Microsoft Entra ID setup guide](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/configure-entra-id)
+for deployment-specific permissions. In Azure, use a managed identity with the
+appropriate permissions; `DefaultAzureCredential` also supports other Azure
+Identity credential sources. No API key is required.
+
+For example, after exporting the variables in your shell:
+
+```sh
+export AZURE_AI_PROJECT_ENDPOINT='<project endpoint>'
+export AZURE_AI_MODEL_DEPLOYMENT='<deployment name>'
+npm run verify:foundry
+```
+
+The command makes a small, billable model request and prints only a success
+message or a sanitized diagnostic, never the model output, endpoint, or token.
+It exits nonzero on failure. Check the configuration, local login, role
+assignments, deployment availability, and network access if it fails. Model
+requests have a 30-second SDK timeout and no automatic retries. This is a
+local development/demo command, not a public HTTP endpoint.
+
+Future application services should receive the `model` service as a dependency
+from the composition root (`createServices` in `src/services.js`) and call
+`await model.complete('Your input')`. It returns text and throws a
+`ModelServiceError` with a safe `code` and message on failure. To test a
+consumer without Azure, inject an object implementing `complete(input, options)`
+as `createServices({ modelService: fakeModel })`. The verification command uses
+the same abstraction; consumers do not need to import the SDK or handle tokens.
+Foundry configuration is checked only when the model service is first used, so
+the existing API runs without it.
 
 ## Endpoints
 
@@ -151,8 +206,12 @@ src/
   domain/validation.js    Input rules and API errors
   data/repository.js      In-memory CRUD implementation
   data/seeds.js           Initial fantasy quests and adventurers
+  foundry/model-service.js Azure Foundry model service
+  services.js             Application service composition
+  verify-foundry.js       Local connection verification command
   server.js               Application entry point
 test/api.test.js           HTTP integration and repository tests
+test/foundry.test.js       Offline model service tests
 openapi.json              API contract
 ```
 

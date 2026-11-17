@@ -36,13 +36,13 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
       if (typeof input !== 'string' || !input.trim()) {
         throw new ModelServiceError('INVALID_INPUT', 'A non-empty input is required.');
       }
-      if (!client) {
-        const config = configuration(env);
-        model = config.model;
-        client = createClient(config.endpoint);
-      }
+      const config = client ? undefined : configuration(env);
       let response;
       try {
+        if (!client) {
+          model = config.model;
+          client = createClient(config.endpoint);
+        }
         response = await client.responses.create({
           model, input,
           ...(options.maxOutputTokens === undefined ? {} : { max_output_tokens: options.maxOutputTokens }),
