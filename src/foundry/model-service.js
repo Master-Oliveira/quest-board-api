@@ -1,5 +1,5 @@
 const OpenAI = require('openai');
-const { DefaultAzureCredential, getBearerTokenProvider } = require('@azure/identity');
+const { DefaultAzureCredential } = require('@azure/identity');
 
 class ModelServiceError extends Error {
   constructor(code, message) {
@@ -82,15 +82,24 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
 }
 
 function defaultClient(endpoint) {
-  const tokenProvider = getBearerTokenProvider(new DefaultAzureCredential(), 'https://ai.azure.com/.default');
+  const credential = new DefaultAzureCredential();
   return new OpenAI({
     baseURL: `${endpoint}/openai/v1`,
-    apiKey: async () => {
+    apiKey: 'foundry-request-auth',
+    fetch: async (url, options = {}) => {
+      let accessToken;
       try {
-        return await tokenProvider();
+        const token = await credential.getToken('https://ai.azure.com/.default', {
+          abortSignal: options.signal,
+        });
+        if (!token?.token) throw new Error('No token was returned.');
+        accessToken = token.token;
       } catch {
         throw new ModelServiceError('AUTHENTICATION_ERROR', 'Azure authentication failed. Check your local login or deployed identity.');
       }
+      const headers = new Headers(options.headers);
+      headers.set('authorization', ['Bearer', accessToken].join(' '));
+      return fetch(url, { ...options, headers });
     },
     timeout: 30000,
     maxRetries: 0,

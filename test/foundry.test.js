@@ -109,7 +109,8 @@ test('real SDK sends a Responses request using Azure Identity without live Azure
   t.after(() => { getToken.mock.restore(); fetchMock.mock.restore(); });
   assert.equal(await createFoundryModelService({ env }).complete('Hi'), 'Hello!');
   assert.equal(getToken.mock.calls.length, 1);
-  assert.deepEqual(getToken.mock.calls[0].arguments[0], ['https://ai.azure.com/.default']);
+  assert.equal(getToken.mock.calls[0].arguments[0], 'https://ai.azure.com/.default');
+  assert.ok(getToken.mock.calls[0].arguments[1].abortSignal instanceof AbortSignal);
   assert.equal(fetchMock.mock.calls.length, 1);
 });
 
@@ -140,10 +141,35 @@ test('deadline covers stalled requests and aborts the client', async () => {
 });
 
 test('deadline covers stalled Azure authentication', async t => {
-  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', () => new Promise(() => {}));
+  let signal;
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', (scopes, options) => {
+    signal = options.abortSignal;
+    return new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    });
+  });
   t.after(() => getToken.mock.restore());
   await assert.rejects(createFoundryModelService({ env, timeoutMs: 10 }).complete('Hi'),
     { code: 'MODEL_TIMEOUT' });
+  assert.equal(signal.aborted, true);
+});
+
+test('concurrent completions use independent Azure token cancellation signals', async t => {
+  const signals = [];
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', (scopes, options) => {
+    const { abortSignal } = options;
+    signals.push(abortSignal);
+    return new Promise((resolve, reject) => {
+      abortSignal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    });
+  });
+  t.after(() => getToken.mock.restore());
+  const service = createFoundryModelService({ env, timeoutMs: 10 });
+  const results = await Promise.allSettled([service.complete('First'), service.complete('Second')]);
+  assert.deepEqual(results.map(result => result.reason.code), ['MODEL_TIMEOUT', 'MODEL_TIMEOUT']);
+  assert.equal(signals.length, 2);
+  assert.notEqual(signals[0], signals[1]);
+  assert.ok(signals.every(signal => signal.aborted));
 });
 
 test('SDK debug logging is disabled even when enabled in the environment', async t => {
