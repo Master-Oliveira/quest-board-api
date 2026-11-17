@@ -20,6 +20,6 @@
     "node": ">=22"
   },
   "dependencies": {
-    "swagger-ui-dist": "5.35.0"
+    "swagger-ui-dist": "5.34.1"
   }
 }
