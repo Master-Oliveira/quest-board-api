@@ -4,6 +4,7 @@ const { createSeeds } = require('../data/seeds');
 const { GuildService } = require('../domain/guild-service');
 const { ApiError, validateFilters } = require('../domain/validation');
 const openapi = require('../../openapi.json');
+const { serveDocs } = require('./docs');
 
 function readJson(request) {
   if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') {
@@ -52,6 +53,7 @@ function createApp() {
   return http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
+      if (request.method === 'GET' && serveDocs(url.pathname, response)) return;
       if (url.pathname === '/openapi.json' && request.method === 'GET') {
         return send(response, 200, openapi);
       }

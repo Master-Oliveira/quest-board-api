@@ -235,3 +235,37 @@ test('OpenAPI is served and describes all ten CRUD operations with resolvable re
   }
   checkReferences(specification);
 });
+
+test('Swagger UI serves local assets and loads the same-origin OpenAPI specification', async t => {
+  const request = await setup(t);
+  for (const path of ['/docs', '/docs/']) {
+    const response = await request(path);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/html/);
+    const html = await response.text();
+    assert.match(html, /id="swagger-ui"/);
+    assert.doesNotMatch(html, /https?:\/\//);
+    const assets = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map(match => match[1]);
+    assert.equal(assets.length, 3);
+    for (const asset of assets) {
+      assert.ok(asset.startsWith('/docs/'));
+      const result = await request(asset);
+      assert.equal(result.status, 200);
+      assert.match(result.headers.get('content-type'),
+        asset.endsWith('.css') ? /text\/css/ : /text\/javascript/);
+      assert.equal(result.headers.get('x-content-type-options'), 'nosniff');
+      assert.ok((await result.text()).length > 0);
+    }
+  }
+  const initializer = await (await request('/docs/initializer.js')).text();
+  assert.match(initializer, /url: '\/openapi.json'/);
+  assert.match(initializer, /validatorUrl: null/);
+  const spec = await (await request('/openapi.json')).json();
+  assert.deepEqual(spec.servers, [{ url: '/' }]);
+  for (const path of ['/docs/unknown.js', '/docs/package.json', '/docs/%2e%2e%2fpackage.json']) {
+    const response = await request(path);
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).error.code, 'NOT_FOUND');
+  }
+  assert.equal((await request('/docs', 'POST', {})).status, 404);
+});

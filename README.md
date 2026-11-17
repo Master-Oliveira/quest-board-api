@@ -2,20 +2,23 @@
 
 A small REST API for an Adventurers' Guild, designed for a developer bootcamp.
 Manage quests and adventurers using an in-memory store seeded with 10 fantasy
-quests and 5 adventurers. No database, external services, or third-party packages
-are required. Data resets whenever the process restarts.
+quests and 5 adventurers. No database or external services are required.
+Swagger UI assets are installed locally through npm. Data resets whenever the
+process restarts.
 
 ## Build, run, and test
 
 Install **Node.js 22 or newer**. From the cloned repository:
 
 ```sh
+npm ci
 npm start
 ```
 
 The API listens at `http://localhost:3000`. Set `PORT` to change the port, for example
 `PORT=4000 npm start` on macOS/Linux. Stop it with Ctrl+C.
-There is no compilation/build step and no dependency installation is needed.
+There is no compilation/build step. Run `npm ci` once after cloning to install
+the dependencies from the lockfile.
 
 Run all automated tests:
 
@@ -119,9 +122,23 @@ Status codes: 400 for invalid input/JSON/filters, 404 for missing routes or reco
 
 ## OpenAPI documentation
 
+After starting the API, open **http://localhost:3000/docs** for Swagger UI
+(use your configured port if different).
+
+1. Expand **GET /quests** and click **Try it out**.
+2. Optionally select a `status` and/or `difficulty`, then click **Execute**.
+3. Inspect the response status and JSON body below the operation.
+4. To create a record, expand **POST /quests** or **POST /adventurers**,
+   click **Try it out**, fill in all writable fields, and click **Execute**.
+   Do not include server-managed `id` or `createdAt` fields.
+5. Copy the returned `id` to test the GET, PUT, and DELETE operations.
+   PUT requires all writable fields, not just the fields being changed.
+
+The UI, specification, and API share the same origin, so no CORS configuration
+is needed. All UI assets are served locally, with no CDN or external validator.
+
 The OpenAPI 3.0 specification is in `openapi.json` and served at
-`GET /openapi.json`. Import it into an OpenAPI-compatible client or Swagger UI
-to browse the schemas and try requests against the running server.
+`GET /openapi.json`. You can also import the file into an OpenAPI-compatible client.
 No documentation service is required to run the API.
 
 ## Project structure
@@ -129,6 +146,7 @@ No documentation service is required to run the API.
 ```text
 src/
   api/app.js              HTTP routing, JSON parsing, and error responses
+  api/docs.js             Swagger UI page and locally served assets
   domain/guild-service.js Business operations
   domain/validation.js    Input rules and API errors
   data/repository.js      In-memory CRUD implementation
