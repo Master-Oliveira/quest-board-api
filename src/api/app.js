@@ -1,7 +1,5 @@
 const http = require('node:http');
-const { InMemoryRepository } = require('../data/repository');
-const { createSeeds } = require('../data/seeds');
-const { GuildService } = require('../domain/guild-service');
+const { createServices } = require('../services');
 const { ApiError, validateFilters } = require('../domain/validation');
 const openapi = require('../../openapi.json');
 const { serveDocs } = require('./docs');
@@ -43,12 +41,7 @@ function send(response, status, data, headers = {}) {
   response.end(data === undefined ? undefined : JSON.stringify(data));
 }
 
-function createApp() {
-  const seeds = createSeeds();
-  const services = Object.fromEntries(Object.entries(seeds)
-    .map(([resource, items]) => [
-      resource, new GuildService(resource, new InMemoryRepository(items)),
-    ]));
+function createApp({ services = createServices() } = {}) {
 
   return http.createServer(async (request, response) => {
     try {
@@ -60,7 +53,7 @@ function createApp() {
       const match = url.pathname.match(/^\/(quests|adventurers)(?:\/([^/]+))?\/?$/);
       if (!match) throw new ApiError(404, 'NOT_FOUND', 'Route not found.');
       const [, resource, id] = match;
-      const service = services[resource];
+      const service = services.guild[resource];
       const methods = id ? ['GET', 'PUT', 'DELETE'] : ['GET', 'POST'];
       if (!methods.includes(request.method)) {
         response.setHeader('Allow', methods.join(', '));

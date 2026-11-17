@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "verify:foundry": "node src/verify-foundry.js"
   },
   "repository": {
     "type": "git",
@@ -20,6 +21,8 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@azure/identity": "4.14.1",
+    "openai": "7.57.0",
     "swagger-ui-dist": "5.34.1"
   }
 }
