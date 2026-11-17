@@ -1,0 +1,22 @@
+{
+  "name": "quest-board-api",
+  "version": "1.0.0",
+  "description": "A simple in-memory REST API for an Adventurers' Guild.",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Master-Oliveira/quest-board-api.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  }
+}

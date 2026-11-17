@@ -1,0 +1,181 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Adventurers' Guild API",
+    "version": "1.0.0",
+    "description": "In-memory quest and adventurer management. All writable fields are required for POST and PUT. PUT replaces writable fields; id and createdAt are server-managed. Data resets on restart. JSON request bodies are limited to 64 KiB."
+  },
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/quests": {
+      "get": {
+        "summary": "List quests",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["open", "in-progress", "completed"] } },
+          { "name": "difficulty", "in": "query", "schema": { "type": "string", "enum": ["easy", "medium", "hard", "legendary"] } }
+        ],
+        "responses": {
+          "200": { "description": "Quests matching all provided filters", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Quest" } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      },
+      "post": {
+        "summary": "Create a quest",
+        "requestBody": { "$ref": "#/components/requestBodies/Quest" },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "headers": { "Location": { "description": "URL of the created quest", "schema": { "type": "string" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      }
+    },
+    "/quests/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "summary": "Get a quest",
+        "responses": {
+          "200": { "description": "Quest", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "summary": "Replace all writable quest fields",
+        "requestBody": { "$ref": "#/components/requestBodies/Quest" },
+        "responses": {
+          "200": { "description": "Updated quest", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a quest",
+        "responses": {
+          "204": { "description": "Deleted; no response body" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/adventurers": {
+      "get": {
+        "summary": "List adventurers",
+        "responses": {
+          "200": { "description": "Adventurers", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Adventurer" } } } } }
+        }
+      },
+      "post": {
+        "summary": "Create an adventurer",
+        "requestBody": { "$ref": "#/components/requestBodies/Adventurer" },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "headers": { "Location": { "description": "URL of the created adventurer", "schema": { "type": "string" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      }
+    },
+    "/adventurers/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "summary": "Get an adventurer",
+        "responses": {
+          "200": { "description": "Adventurer", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "summary": "Replace all writable adventurer fields",
+        "requestBody": { "$ref": "#/components/requestBodies/Adventurer" },
+        "responses": {
+          "200": { "description": "Updated adventurer", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      },
+      "delete": {
+        "summary": "Delete an adventurer",
+        "responses": {
+          "204": { "description": "Deleted; no response body" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Opaque resource ID (seed IDs or generated UUIDs)" }
+    },
+    "requestBodies": {
+      "Quest": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } } },
+      "Adventurer": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } } }
+    },
+    "schemas": {
+      "Quest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "description", "difficulty", "minimumLevel", "goldReward", "experienceReward", "status", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "readOnly": true },
+          "title": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+          "description": { "type": "string", "minLength": 1, "maxLength": 5000, "pattern": "\\S" },
+          "difficulty": { "type": "string", "enum": ["easy", "medium", "hard", "legendary"] },
+          "minimumLevel": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "goldReward": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "experienceReward": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "status": { "type": "string", "enum": ["open", "in-progress", "completed"] },
+          "createdAt": { "type": "string", "format": "date-time", "readOnly": true }
+        }
+      },
+      "Adventurer": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "level", "experience", "gold", "status"],
+        "properties": {
+          "id": { "type": "string", "readOnly": true },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+          "level": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "experience": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "gold": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "status": { "type": "string", "enum": ["active", "inactive"] }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "details": { "type": "array", "items": {
+                "type": "object",
+                "required": ["field", "message"],
+                "properties": { "field": { "type": "string" }, "message": { "type": "string" } }
+              } }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": { "description": "Invalid JSON, fields, or quest filters (unknown and duplicate quest filters are rejected)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "Resource not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "TooLarge": { "description": "Body exceeds 64 KiB", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "UnsupportedMediaType": { "description": "Content-Type must be application/json", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    }
+  }
+}

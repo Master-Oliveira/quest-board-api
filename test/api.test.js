@@ -1,0 +1,237 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const { createApp } = require('../src/api/app');
+const { InMemoryRepository } = require('../src/data/repository');
+const { createSeeds } = require('../src/data/seeds');
+const specification = require('../openapi.json');
+
+const quest = {
+  title: 'Find the crystal', description: 'Search the ancient forest.',
+  difficulty: 'easy', minimumLevel: 1, goldReward: 0, experienceReward: 50, status: 'open',
+};
+const adventurer = { name: 'Elara', level: 1, experience: 0, gold: 0, status: 'active' };
+
+async function setup(t) {
+  const server = createApp();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve, reject) => {
+    server.close(error => error ? reject(error) : resolve());
+    server.closeIdleConnections();
+  }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  return (path, method = 'GET', body, headers = {}) => fetch(`${base}${path}`, {
+    method,
+    headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+for (const [resource, input, minimumSeeds] of [
+  ['quests', quest, 10], ['adventurers', adventurer, 5],
+]) {
+  test(`${resource}: seeded list and full CRUD lifecycle`, async t => {
+    const request = await setup(t);
+    const list = await request(`/${resource}`);
+    assert.equal(list.status, 200);
+    const seeds = await list.json();
+    assert.ok(seeds.length >= minimumSeeds);
+    assert.equal(new Set(seeds.map(item => item.id)).size, seeds.length);
+    for (const seed of seeds) {
+      for (const field of Object.keys(input)) assert.ok(Object.hasOwn(seed, field));
+    }
+
+    const created = await request(`/${resource}`, 'POST', input);
+    assert.equal(created.status, 201);
+    const item = await created.json();
+    assert.match(item.id, /^[0-9a-f-]{36}$/);
+    assert.equal(created.headers.get('location'), `/${resource}/${item.id}`);
+    if (resource === 'quests') assert.ok(Number.isFinite(Date.parse(item.createdAt)));
+    assert.deepEqual(await (await request(created.headers.get('location'))).json(), item);
+
+    const updatedInput = resource === 'quests'
+      ? { ...input, title: 'A new title', status: 'completed', difficulty: 'legendary' }
+      : { ...input, name: 'A new name', status: 'inactive', level: 20 };
+    const updated = await request(`/${resource}/${item.id}`, 'PUT', updatedInput);
+    assert.equal(updated.status, 200);
+    assert.deepEqual(await updated.json(), { ...item, ...updatedInput });
+    const listed = await (await request(`/${resource}`)).json();
+    assert.deepEqual(listed.find(entry => entry.id === item.id), { ...item, ...updatedInput });
+
+    const deleted = await request(`/${resource}/${item.id}`, 'DELETE');
+    assert.equal(deleted.status, 204);
+    assert.equal(await deleted.text(), '');
+    for (const method of ['GET', 'PUT', 'DELETE']) {
+      const missing = await request(`/${resource}/${item.id}`, method,
+        method === 'PUT' ? input : undefined);
+      assert.equal(missing.status, 404);
+      assert.equal((await missing.json()).error.code, 'NOT_FOUND');
+    }
+    assert.equal((await (await request(`/${resource}`)).json()).length, seeds.length);
+  });
+
+  test(`${resource}: rejects invalid bodies on create and update without mutating data`, async t => {
+    const request = await setup(t);
+    const seed = (await (await request(`/${resource}`)).json())[0];
+    const invalid = [null, [], 'text', 123, {}, { ...input, extra: true }, { ...input, id: 'custom' }];
+    for (const field of Object.keys(input)) {
+      const missing = { ...input };
+      delete missing[field];
+      invalid.push(missing, { ...input, [field]: null });
+      if (typeof input[field] === 'number') {
+        for (const value of [-1, 0.5, '1', true, Number.MAX_SAFE_INTEGER + 1]) {
+          invalid.push({ ...input, [field]: value });
+        }
+      } else {
+        invalid.push({ ...input, [field]: '' }, { ...input, [field]: '   ' });
+      }
+    }
+    invalid.push({ ...input, status: 'unknown' });
+    if (resource === 'quests') {
+      invalid.push(
+        { ...input, difficulty: 'impossible' }, { ...input, minimumLevel: 0 },
+        { ...input, createdAt: '2020-01-01' }, { ...input, title: 'x'.repeat(201) },
+        { ...input, description: 'x'.repeat(5001) },
+      );
+    } else {
+      invalid.push({ ...input, level: 0 }, { ...input, name: 'x'.repeat(201) });
+    }
+    for (const body of invalid) {
+      for (const [method, path] of [['POST', `/${resource}`], ['PUT', `/${resource}/${seed.id}`]]) {
+        const response = await request(path, method, body);
+        assert.equal(response.status, 400, `${method}: ${JSON.stringify(body)}`);
+        const result = await response.json();
+        assert.equal(result.error.code, 'VALIDATION_ERROR');
+        assert.equal(typeof result.error.message, 'string');
+      }
+    }
+    assert.deepEqual(await (await request(`/${resource}/${seed.id}`)).json(), seed);
+    assert.equal((await (await request(`/${resource}`)).json()).length, minimumSeeds);
+  });
+}
+
+test('quest filters work separately and together, with empty results and validation', async t => {
+  const request = await setup(t);
+  const all = await (await request('/quests')).json();
+  for (const query of [
+    'status=open', 'status=in-progress', 'status=completed',
+    'difficulty=easy', 'difficulty=medium', 'difficulty=hard', 'difficulty=legendary',
+    'status=completed&difficulty=legendary',
+  ]) {
+    const response = await request(`/quests?${query}`);
+    assert.equal(response.status, 200);
+    const filters = [...new URLSearchParams(query)];
+    assert.deepEqual(await response.json(),
+      all.filter(item => filters.every(([key, value]) => item[key] === value)));
+  }
+  for (const item of all.filter(entry => entry.status === 'open')) {
+    await request(`/quests/${item.id}`, 'DELETE');
+  }
+  assert.deepEqual(await (await request('/quests?status=open')).json(), []);
+  for (const query of ['status=unknown', 'difficulty=HARD', 'status=', 'other=x',
+    'status=open&status=completed', 'difficulty=easy&difficulty=easy', '__proto__=x']) {
+    const response = await request(`/quests?${query}`);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
+  }
+});
+
+test('JSON parsing, media type, size limits, and routing return consistent errors', async t => {
+  const request = await setup(t);
+  for (const resource of ['quests', 'adventurers']) {
+    const seed = (await (await request(`/${resource}`)).json())[0];
+    for (const [method, path] of [['POST', `/${resource}`], ['PUT', `/${resource}/${seed.id}`]]) {
+      const invalid = await request(path, method);
+      assert.equal(invalid.status, 415);
+      assert.equal((await invalid.json()).error.code, 'UNSUPPORTED_MEDIA_TYPE');
+      const wrongType = await request(path, method, {}, { 'Content-Type': 'text/plain' });
+      assert.equal(wrongType.status, 415);
+      const tooLarge = await request(path, method, { description: 'x'.repeat(65536) });
+      assert.equal(tooLarge.status, 413);
+      assert.equal((await tooLarge.json()).error.code, 'PAYLOAD_TOO_LARGE');
+    }
+  }
+  const server = await request('/quests');
+  const base = new URL(server.url).origin;
+  for (const body of ['', '{', '{"title":']) {
+    const response = await fetch(`${base}/quests`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'INVALID_JSON');
+  }
+  for (const path of ['/unknown', '/quests/missing/extra', '/adventurers/missing']) {
+    const response = await request(path);
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).error.code, 'NOT_FOUND');
+  }
+  for (const [path, allow] of [['/quests', 'GET, POST'], ['/adventurers/id', 'GET, PUT, DELETE']]) {
+    const response = await request(path, 'PATCH', {});
+    assert.equal(response.status, 405);
+    assert.equal(response.headers.get('allow'), allow);
+    assert.equal((await response.json()).error.code, 'METHOD_NOT_ALLOWED');
+  }
+});
+
+test('valid boundary values and whitespace normalization', async t => {
+  const request = await setup(t);
+  const body = {
+    ...quest, title: '  A quest  ', description: 'x'.repeat(5000),
+    goldReward: Number.MAX_SAFE_INTEGER,
+  };
+  const response = await request('/quests', 'POST', body,
+    { 'Content-Type': 'application/json; charset=utf-8' });
+  assert.equal(response.status, 201);
+  const item = await response.json();
+  assert.equal(item.title, 'A quest');
+  assert.equal(item.description.length, 5000);
+  assert.equal(item.goldReward, Number.MAX_SAFE_INTEGER);
+});
+
+test('each app starts with independent seed data', async t => {
+  const first = await setup(t);
+  const second = await setup(t);
+  await first('/quests/quest-1', 'DELETE');
+  assert.equal((await second('/quests/quest-1')).status, 200);
+});
+
+test('repository does not expose mutable internal records', () => {
+  const seeds = createSeeds();
+  const repository = new InMemoryRepository(seeds.quests);
+  seeds.quests[0].title = 'mutated seed';
+  const item = repository.get('quest-1');
+  item.title = 'mutated get';
+  repository.list()[0].title = 'mutated list';
+  assert.equal(repository.get('quest-1').title, 'Rats in the Cellar');
+  const created = repository.create(quest);
+  created.title = 'mutated create';
+  assert.equal(repository.get(created.id).title, quest.title);
+  const updated = repository.update(created.id, quest);
+  updated.title = 'mutated update';
+  assert.equal(repository.get(created.id).title, quest.title);
+  assert.equal(repository.update('missing', quest), undefined);
+});
+
+test('OpenAPI is served and describes all ten CRUD operations with resolvable references', async t => {
+  const request = await setup(t);
+  const response = await request('/openapi.json');
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(await response.json(), specification);
+  for (const resource of ['quests', 'adventurers']) {
+    for (const method of ['get', 'post']) assert.ok(specification.paths[`/${resource}`][method]);
+    for (const method of ['get', 'put', 'delete']) {
+      assert.ok(specification.paths[`/${resource}/{id}`][method]);
+    }
+  }
+  function checkReferences(value) {
+    if (!value || typeof value !== 'object') return;
+    if (value.$ref) {
+      assert.ok(value.$ref.startsWith('#/'));
+      assert.ok(value.$ref.slice(2).split('/').reduce((result, key) => result?.[key], specification));
+    }
+    Object.values(value).forEach(checkReferences);
+  }
+  checkReferences(specification);
+});
