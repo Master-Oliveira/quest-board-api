@@ -132,6 +132,35 @@ test('real SDK sends a Responses request using Azure Identity without live Azure
   assert.equal(fetchMock.mock.calls.length, endpoints.length);
 });
 
+test('real SDK failures distinguish rejected requests, missing deployments, and connection failures safely', async t => {
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', async () => ({
+    token: 'test-token', expiresOnTimestamp: Date.now() + 3600000,
+  }));
+  let upstreamStatus;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    if (upstreamStatus === undefined) throw new TypeError('private connection details');
+    return new Response(JSON.stringify({
+      error: { code: 'private upstream code', message: 'private upstream details' },
+    }), { status: upstreamStatus, headers: { 'content-type': 'application/json' } });
+  });
+  t.after(() => { getToken.mock.restore(); fetchMock.mock.restore(); });
+  for (const [status, message] of [
+    [400, /rejected the request \(HTTP 400\)/],
+    [422, /rejected the request \(HTTP 422\)/],
+    [404, /HTTP 404.*exact deployment name/],
+    [undefined, /No HTTP response.*DNS, TLS certificates, proxy/],
+  ]) {
+    upstreamStatus = status;
+    await assert.rejects(createFoundryModelService({ env }).complete('Hi'), error => {
+      assert.equal(error.code, 'MODEL_UNAVAILABLE');
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /private|test-token|example\.test/);
+      return true;
+    });
+  }
+  assert.equal(fetchMock.mock.calls.length, 4);
+});
+
 test('Azure credential errors are sanitized', async t => {
   const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', async () => {
     throw new Error('private credential details');

@@ -87,7 +87,58 @@ message or a sanitized diagnostic, never the model output, endpoint, or token.
 It exits nonzero on failure. Check the configuration, local login, role
 assignments, deployment availability, and network access if it fails. Model
 requests have a 30-second deadline and no automatic retries. This is a
-local development/demo command, not a public HTTP endpoint.
+local development/demo command.
+
+### Test through REST or Swagger
+
+After setting the same environment variables and running `npm start`, open
+`http://localhost:3000/docs` and use **POST /model/test**, or run in PowerShell:
+
+```powershell
+Invoke-RestMethod -Uri 'http://localhost:3000/model/test' -Method Post `
+  -ContentType 'application/json' `
+  -Body '{"input":"Reply with a short greeting."}'
+```
+
+The JSON response is `{ "text": "Hello, adventurer!" }` (actual text varies).
+The request must contain only `input`, a non-blank string of at most 5000 Unicode
+code points, measured before trimming. Responses are limited to 128 output
+tokens. Requests that exhaust that limit and produce an incomplete response
+return an error, not partial text. The JSON-only policy and 64 KiB body limit apply.
+
+This endpoint invokes the configured model and incurs usage charges. It is
+unauthenticated and intended only for local testing; do not expose it publicly.
+Only the caller receives model text; the server does not log it.
+Errors use the standard envelope: 500 for configuration or unexpected errors,
+502 for Azure authentication/access failures or invalid model responses,
+503 for an unavailable model, and 504 for timeouts. Configuration and model
+errors contain sanitized diagnostics; unexpected errors return a generic message.
+Other routes still work without Foundry configuration.
+
+If a request returns `MODEL_UNAVAILABLE`, its sanitized message distinguishes
+HTTP 400/422 request rejection, HTTP 404 endpoint/deployment lookup failure,
+and connection failures without an HTTP response. For HTTP 404, confirm that
+`AZURE_AI_MODEL_DEPLOYMENT` matches the deployment name shown in Foundry, which
+may differ from the model family, and that it belongs to the configured resource.
+For HTTP 400/422, check the deployed model's Responses API and output-token
+requirements. For connection failures, check DNS, TLS trust, proxy settings,
+and network access. Do not disable TLS verification or enable SDK debug logging
+to diagnose the problem. Restart the server after changing environment settings;
+the model client caches configuration after its first use.
+
+If Node's default connection fails with `ECONNRESET` while Windows curl works,
+test whether a certificate-verified TLS 1.2 connection succeeds. On an affected
+Windows connection, the following startup command was verified with a successful
+`POST /model/test` request:
+
+```powershell
+node --tls-max-v1.2 --env-file=.env .\src\server.js
+```
+
+This is a process-scoped workaround, not a required application setting.
+Certificate verification remains enabled. Investigate endpoint or network
+handling of newer TLS connections before making this a permanent startup option.
+Do not use `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
 Future application services should receive the `model` service as a dependency
 from the composition root (`createServices` in `src/services.js`) and call
@@ -113,6 +164,7 @@ the existing API runs without it.
 | POST | `/adventurers` | 201, created adventurer and `Location` header |
 | PUT | `/adventurers/{id}` | 200, updated adventurer |
 | DELETE | `/adventurers/{id}` | 204, no body |
+| POST | `/model/test` | 200, object with model `text` |
 
 Filter quests using `status` and/or `difficulty`, for example:
 

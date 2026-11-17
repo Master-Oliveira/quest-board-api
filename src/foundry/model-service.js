@@ -70,8 +70,20 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
         if (error?.status === 401 || error?.status === 403) {
           throw new ModelServiceError('AUTHENTICATION_ERROR', 'Azure authentication or model access failed. Check your identity and permissions.');
         }
+        if (error?.status === 400 || error?.status === 422) {
+          throw new ModelServiceError('MODEL_UNAVAILABLE',
+            `Foundry rejected the request (HTTP ${error.status}). Check Responses API support and the output-token limit for the deployed model.`);
+        }
+        if (error?.status === 404) {
+          throw new ModelServiceError('MODEL_UNAVAILABLE',
+            'Foundry returned HTTP 404. Check that AZURE_AI_MODEL_ENDPOINT is the resource hosting the deployment and AZURE_AI_MODEL_DEPLOYMENT is its exact deployment name, not just the model family.');
+        }
         if (error?.status === 429 || error?.status >= 500) {
           throw new ModelServiceError('MODEL_UNAVAILABLE', 'The Foundry model is temporarily unavailable. Try again.');
+        }
+        if (error instanceof OpenAI.APIConnectionError) {
+          throw new ModelServiceError('MODEL_UNAVAILABLE',
+            'No HTTP response was received from Foundry. Check DNS, TLS certificates, proxy settings, and network access to the configured endpoint.');
         }
         throw new ModelServiceError('MODEL_UNAVAILABLE', 'Unable to reach the Foundry model. Check the endpoint and deployment.');
       } finally {

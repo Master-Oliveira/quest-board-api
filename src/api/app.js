@@ -1,6 +1,7 @@
 const http = require('node:http');
 const { createServices } = require('../services');
-const { ApiError, validateFilters } = require('../domain/validation');
+const { ApiError, validateInput, validateFilters } = require('../domain/validation');
+const { ModelServiceError } = require('../foundry/model-service');
 const openapi = require('../../openapi.json');
 const { serveDocs } = require('./docs');
 
@@ -50,6 +51,15 @@ function createApp({ services = createServices() } = {}) {
       if (url.pathname === '/openapi.json' && request.method === 'GET') {
         return send(response, 200, openapi);
       }
+      if (url.pathname === '/model/test' || url.pathname === '/model/test/') {
+        if (request.method !== 'POST') {
+          response.setHeader('Allow', 'POST');
+          throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed.');
+        }
+        const { input } = validateInput('modelTest', await readJson(request));
+        const text = await services.model.complete(input, { maxOutputTokens: 128 });
+        return send(response, 200, { text });
+      }
       const match = url.pathname.match(/^\/(quests|adventurers)(?:\/([^/]+))?\/?$/);
       if (!match) throw new ApiError(404, 'NOT_FOUND', 'Route not found.');
       const [, resource, id] = match;
@@ -74,6 +84,16 @@ function createApp({ services = createServices() } = {}) {
       service.delete(id);
       return send(response, 204);
     } catch (error) {
+      if (error instanceof ModelServiceError) {
+        const status = {
+          CONFIGURATION_ERROR: 500,
+          AUTHENTICATION_ERROR: 502,
+          MODEL_UNAVAILABLE: 503,
+          MODEL_TIMEOUT: 504,
+          INVALID_MODEL_RESPONSE: 502,
+        }[error.code];
+        if (status) error = new ApiError(status, error.code, error.message);
+      }
       const known = error instanceof ApiError;
       send(response, known ? error.status : 500, {
         error: {

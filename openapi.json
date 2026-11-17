@@ -7,6 +7,52 @@
   },
   "servers": [{ "url": "/" }],
   "paths": {
+    "/model/test": {
+      "post": {
+        "summary": "Test the Foundry model",
+        "description": "Local development only: unauthenticated, billable model call. Input is trimmed after validating its supplied length (Unicode code points). Output is limited to 128 tokens; incomplete responses fail instead of returning partial text. Uses a 30-second deadline with no retries.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "$ref": "#/components/schemas/ModelTestInput" },
+            "example": { "input": "Reply with a short greeting." }
+          } }
+        },
+        "responses": {
+          "200": {
+            "description": "Completed model text",
+            "content": { "application/json": {
+              "schema": { "$ref": "#/components/schemas/ModelTestResult" },
+              "example": { "text": "Hello, adventurer!" }
+            } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "405": {
+            "description": "Only POST is allowed",
+            "headers": { "Allow": { "schema": { "type": "string", "enum": ["POST"] } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": {
+            "description": "CONFIGURATION_ERROR or unexpected INTERNAL_ERROR",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": {
+            "description": "AUTHENTICATION_ERROR or INVALID_MODEL_RESPONSE",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "503": {
+            "description": "MODEL_UNAVAILABLE",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "504": {
+            "description": "MODEL_TIMEOUT",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
     "/quests": {
       "get": {
         "summary": "List quests",
@@ -122,6 +168,22 @@
       "Adventurer": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } } }
     },
     "schemas": {
+      "ModelTestInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["input"],
+        "properties": {
+          "input": { "type": "string", "minLength": 1, "maxLength": 5000, "pattern": "\\S" }
+        }
+      },
+      "ModelTestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+      },
       "Quest": {
         "type": "object",
         "additionalProperties": false,

@@ -2,6 +2,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const { createApp } = require('../src/api/app');
+const { createServices } = require('../src/services');
+const { ModelServiceError } = require('../src/foundry/model-service');
 const { InMemoryRepository } = require('../src/data/repository');
 const { createSeeds } = require('../src/data/seeds');
 const specification = require('../openapi.json');
@@ -12,8 +14,8 @@ const quest = {
 };
 const adventurer = { name: 'Elara', level: 1, experience: 0, gold: 0, status: 'active' };
 
-async function setup(t) {
-  const server = createApp();
+async function setup(t, options) {
+  const server = createApp(options);
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => new Promise((resolve, reject) => {
@@ -248,12 +250,99 @@ test('repository does not expose mutable internal records', () => {
   assert.equal(repository.update('missing', quest), undefined);
 });
 
-test('OpenAPI is served and describes all ten CRUD operations with resolvable references', async t => {
+test('model test returns model text and forwards validated input with a bounded output', async t => {
+  const calls = [];
+  const request = await setup(t, { services: createServices({ modelService: {
+    complete: async (...args) => { calls.push(args); return 'Hello from Foundry!'; },
+  } }) });
+  for (const [path, input, expected] of [
+    ['/model/test', '  Say hello  ', 'Say hello'],
+    ['/model/test/', '\u{1F409}'.repeat(5000), '\u{1F409}'.repeat(5000)],
+  ]) {
+    const response = await request(path, 'POST', { input });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /application\/json/);
+    assert.deepEqual(await response.json(), { text: 'Hello from Foundry!' });
+    assert.deepEqual(calls.at(-1), [expected, { maxOutputTokens: 128 }]);
+  }
+  assert.equal(calls.length, 2);
+});
+
+test('model test rejects invalid requests before invoking the model', async t => {
+  let calls = 0;
+  const request = await setup(t, { services: createServices({ modelService: {
+    complete: async () => { calls++; return 'Must not be called'; },
+  } }) });
+  for (const body of [null, [], 'hello', {}, { input: null }, { input: 42 },
+    { input: '' }, { input: '   ' }, { input: 'x'.repeat(5001) },
+    { input: ` ${'x'.repeat(5000)} ` }, { input: '\u{1F409}'.repeat(5001) },
+    { input: 'Hi', extra: true }, { input: 'Hi', maxOutputTokens: 10000 }]) {
+    const response = await request('/model/test', 'POST', body);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
+  }
+  for (const [body, headers, status, code] of [
+    [undefined, {}, 415, 'UNSUPPORTED_MEDIA_TYPE'],
+    [{ input: 'Hi' }, { 'Content-Type': 'text/plain' }, 415, 'UNSUPPORTED_MEDIA_TYPE'],
+    [{ input: 'x'.repeat(65536) }, {}, 413, 'PAYLOAD_TOO_LARGE'],
+  ]) {
+    const response = await request('/model/test', 'POST', body, headers);
+    assert.equal(response.status, status);
+    assert.equal((await response.json()).error.code, code);
+  }
+  const response = await request('/model/test');
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get('allow'), 'POST');
+  const malformed = await fetch(response.url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{',
+  });
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json()).error.code, 'INVALID_JSON');
+  assert.equal(calls, 0);
+});
+
+test('model test translates safe model errors and hides unexpected failures', async t => {
+  let failure;
+  const request = await setup(t, { services: createServices({ modelService: {
+    complete: async () => { throw failure; },
+  } }) });
+  for (const [code, status] of [
+    ['CONFIGURATION_ERROR', 500], ['AUTHENTICATION_ERROR', 502],
+    ['MODEL_UNAVAILABLE', 503], ['MODEL_TIMEOUT', 504], ['INVALID_MODEL_RESPONSE', 502],
+  ]) {
+    failure = new ModelServiceError(code, 'Safe model diagnostic.');
+    const response = await request('/model/test', 'POST', { input: 'Hi' });
+    assert.equal(response.status, status);
+    assert.deepEqual(await response.json(), { error: { code, message: 'Safe model diagnostic.' } });
+  }
+  failure = new Error('private SDK details');
+  const response = await request('/model/test', 'POST', { input: 'Hi' });
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), {
+    error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' },
+  });
+});
+
+test('model configuration is optional for CRUD but required for model requests', async t => {
+  const request = await setup(t, { services: createServices({ env: {} }) });
+  assert.equal((await request('/quests')).status, 200);
+  const response = await request('/model/test', 'POST', { input: 'Hi' });
+  assert.equal(response.status, 500);
+  assert.equal((await response.json()).error.code, 'CONFIGURATION_ERROR');
+});
+
+test('OpenAPI is served and describes CRUD and model operations with resolvable references', async t => {
   const request = await setup(t);
   const response = await request('/openapi.json');
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type'), /application\/json/);
   assert.deepEqual(await response.json(), specification);
+  const modelTest = specification.paths['/model/test'].post;
+  assert.ok(modelTest.requestBody.required);
+  assert.deepEqual(modelTest.requestBody.content['application/json'].schema,
+    { $ref: '#/components/schemas/ModelTestInput' });
+  assert.deepEqual(modelTest.responses['200'].content['application/json'].schema,
+    { $ref: '#/components/schemas/ModelTestResult' });
   for (const resource of ['quests', 'adventurers']) {
     for (const method of ['get', 'post']) assert.ok(specification.paths[`/${resource}`][method]);
     for (const method of ['get', 'put', 'delete']) {
