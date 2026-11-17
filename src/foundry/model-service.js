@@ -10,22 +10,26 @@ class ModelServiceError extends Error {
 }
 
 function configuration(env) {
-  const endpoint = env.AZURE_AI_PROJECT_ENDPOINT?.trim();
+  const endpoint = env.AZURE_AI_MODEL_ENDPOINT?.trim();
   const model = env.AZURE_AI_MODEL_DEPLOYMENT?.trim();
   if (!endpoint || !model) {
     throw new ModelServiceError('CONFIGURATION_ERROR',
-      'Set AZURE_AI_PROJECT_ENDPOINT and AZURE_AI_MODEL_DEPLOYMENT.');
+      'Set AZURE_AI_MODEL_ENDPOINT and AZURE_AI_MODEL_DEPLOYMENT.');
   }
   let url;
   try {
     url = new URL(endpoint);
   } catch {
-    throw new ModelServiceError('CONFIGURATION_ERROR', 'The Foundry project endpoint must be a valid HTTPS URL.');
+    throw new ModelServiceError('CONFIGURATION_ERROR', 'The Foundry model endpoint must be a valid HTTPS URL.');
   }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new ModelServiceError('CONFIGURATION_ERROR', 'The Foundry project endpoint must be a valid HTTPS URL without credentials, query, or fragment.');
+    throw new ModelServiceError('CONFIGURATION_ERROR', 'The Foundry model endpoint must be a valid HTTPS URL without credentials, query, or fragment.');
   }
-  return { endpoint: endpoint.replace(/\/+$/, ''), model };
+  if (!/^\/+$/.test(url.pathname)) {
+    throw new ModelServiceError('CONFIGURATION_ERROR',
+      'Set AZURE_AI_MODEL_ENDPOINT to the resource root URL, without /api/projects, /openai/v1, or other paths.');
+  }
+  return { endpoint: url.origin, model };
 }
 
 function createFoundryModelService({ env = process.env, createClient = defaultClient, timeoutMs = 30000 } = {}) {
