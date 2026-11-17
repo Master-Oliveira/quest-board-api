@@ -131,8 +131,9 @@ validation.
 * Never commit credentials or log bearer tokens, raw SDK errors, model output,
   or private endpoint details. Keep model errors sanitized and SDK logging off.
 * Foundry uses `DefaultAzureCredential`, not committed API keys. Only send tokens
-  to a trusted HTTPS project endpoint without URL credentials, query, or
-  fragment. Preserve lazy configuration, the 30-second deadline covering
+  to a trusted HTTPS model resource root configured through
+  `AZURE_AI_MODEL_ENDPOINT`, without URL credentials, query, fragment, or paths.
+  Preserve lazy configuration, the 30-second deadline covering
   authentication and inference, request cancellation, and no automatic retries.
 * The application reads environment variables directly; it does not load
   `.env` automatically. Do not silently add dotenv loading or bypass TLS or

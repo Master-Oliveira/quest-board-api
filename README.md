@@ -1,4 +1,7 @@
-# quest-board-api
+---
+title: quest-board-api
+description: An in-memory Adventurers' Guild REST API with an optional Foundry model service.
+---
 
 A small REST API for an Adventurers' Guild, designed for a developer bootcamp.
 Manage quests and adventurers using an in-memory store seeded with 10 fantasy
@@ -38,8 +41,8 @@ Tests use Node's built-in runner and isolated servers on ephemeral local ports.
 ## Azure AI Foundry connection
 
 The optional model service uses the OpenAI Responses API through a Microsoft
-Foundry project endpoint and Azure Identity's `DefaultAzureCredential`. It does
-not generate quests or change the existing API. You need a Foundry project and
+Foundry resource's model inference endpoint and Azure Identity's `DefaultAzureCredential`.
+It does not generate quests or change the existing API. You need a Foundry resource and
 a deployed model that supports the Responses API and Microsoft Entra ID
 authentication. Model calls may incur charges.
 
@@ -47,10 +50,17 @@ Set these environment variables (see `.env.example`):
 
 | Variable | Description |
 | --- | --- |
-| `AZURE_AI_PROJECT_ENDPOINT` | HTTPS project endpoint copied from the Foundry portal, in the form `https://<resource>.services.ai.azure.com/api/projects/<project>`, without `/openai/v1` |
+| `AZURE_AI_MODEL_ENDPOINT` | HTTPS resource root, such as `https://<resource>.services.ai.azure.com` or `https://<resource>.openai.azure.com`, without any path |
 | `AZURE_AI_MODEL_DEPLOYMENT` | Name of the deployed model, not necessarily its base model name |
 
-Use only a trusted project endpoint: the application sends an Azure bearer token
+The service appends `/openai/v1` and sends requests to `/openai/v1/responses`.
+Do not use the project endpoint (`/api/projects/<project>`), a deployment URL,
+or a URL already ending in `/openai/v1`. See Microsoft's
+[model endpoint documentation](https://learn.microsoft.com/azure/foundry/foundry-models/concepts/endpoints#azure-openai-inference-endpoint).
+If you previously configured `AZURE_AI_PROJECT_ENDPOINT`, replace it with
+`AZURE_AI_MODEL_ENDPOINT` and set its value to the resource root URL.
+
+Use only a trusted model endpoint: the application sends an Azure bearer token
 to it. Do not include credentials, query parameters, or a fragment in the URL.
 The application reads environment variables directly; it does not load `.env`
 files automatically.
@@ -64,11 +74,11 @@ for deployment-specific permissions. In Azure, use a managed identity with the
 appropriate permissions; `DefaultAzureCredential` also supports other Azure
 Identity credential sources. No API key is required.
 
-For example, after exporting the variables in your shell:
+For example, in PowerShell:
 
-```sh
-export AZURE_AI_PROJECT_ENDPOINT='<project endpoint>'
-export AZURE_AI_MODEL_DEPLOYMENT='<deployment name>'
+```powershell
+$env:AZURE_AI_MODEL_ENDPOINT = 'https://<resource>.services.ai.azure.com'
+$env:AZURE_AI_MODEL_DEPLOYMENT = '<deployment name>'
 npm run verify:foundry
 ```
 
