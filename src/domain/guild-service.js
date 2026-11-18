@@ -25,7 +25,13 @@ class GuildService {
   update(id, input) {
     const existing = this.get(id);
     const data = validateInput(this.resource, input);
-    if (this.resource === 'quests') data.createdAt = existing.createdAt;
+    if (this.resource === 'quests') {
+      data.createdAt = existing.createdAt;
+      if (existing.aiGenerated === true) {
+        data.aiGenerated = true;
+        data.objectives = existing.objectives;
+      }
+    }
     return this.repository.update(id, data);
   }
 

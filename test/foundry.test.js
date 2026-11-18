@@ -68,9 +68,41 @@ test('configuration is lazy, required, and rejects unsafe endpoint URLs', async 
 
 test('empty, invalid, and incomplete model responses fail safely', async () => {
   for (const response of [null, {}, { status: 'completed', output_text: '  ' },
-    { status: 'incomplete', output_text: 'partial' }]) {
+    { status: 'incomplete', output_text: 'partial' },
+    { status: 'failed', output_text: 'private partial text' },
+    { status: 'completed', output_text: 'private text',
+      output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'private refusal' }] }] }]) {
     await assert.rejects(verify(fakeService(response).service), { code: 'INVALID_MODEL_RESPONSE' });
   }
+});
+
+test('real SDK forwards strict structured output and per-call budget without live Azure access', async t => {
+  const outputFormat = {
+    type: 'json_schema', name: 'example', strict: true,
+    schema: {
+      type: 'object', additionalProperties: false, required: ['title'],
+      properties: { title: { type: 'string' } },
+    },
+  };
+  const getToken = mock.method(DefaultAzureCredential.prototype, 'getToken', async () => ({
+    token: 'test-token', expiresOnTimestamp: Date.now() + 3600000,
+  }));
+  const fetchMock = mock.method(globalThis, 'fetch', async (url, init) => {
+    assert.deepEqual(JSON.parse(init.body), {
+      model: 'deployment', input: 'Generate', max_output_tokens: 4096,
+      text: { format: outputFormat },
+    });
+    assert.ok(init.signal instanceof AbortSignal);
+    return new Response(JSON.stringify({
+      object: 'response', status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: '{"title":"Quest"}' }] }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  t.after(() => { getToken.mock.restore(); fetchMock.mock.restore(); });
+  assert.equal(await createFoundryModelService({ env }).complete('Generate', {
+    outputFormat, maxOutputTokens: 4096,
+  }), '{"title":"Quest"}');
+  assert.equal(fetchMock.mock.calls.length, 1);
 });
 
 test('client errors are classified without exposing raw error details', async () => {

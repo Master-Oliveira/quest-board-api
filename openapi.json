@@ -10,7 +10,7 @@
     "/model/test": {
       "post": {
         "summary": "Test the Foundry model",
-        "description": "Local development only: unauthenticated, billable model call. Requests must come from a loopback address with a localhost, 127.0.0.1, or [::1] Host header. At most two model calls run at once. Input is trimmed after validating its supplied length (Unicode code points). Output is limited to 512 tokens by default (MODEL_TEST_MAX_OUTPUT_TOKENS, 16-4096); incomplete responses fail instead of returning partial text. Uses a 30-second deadline with no retries, and the model call is cancelled if the client disconnects.",
+        "description": "Local development only: unauthenticated, billable model call. Requests must come from a loopback address with a localhost, 127.0.0.1, or [::1] Host header. At most two model calls run at once, shared with POST /quests/generate. Input is trimmed after validating its supplied length (Unicode code points). Output is limited to 512 tokens by default (MODEL_TEST_MAX_OUTPUT_TOKENS, 16-4096); incomplete responses fail instead of returning partial text. Uses a 30-second deadline with no retries, and the model call is cancelled if the client disconnects.",
         "requestBody": {
           "required": true,
           "content": { "application/json": {
@@ -62,6 +62,64 @@
         }
       }
     },
+    "/quests/generate": {
+      "post": {
+        "summary": "Generate and save a personalized quest",
+        "description": "Local-only, unauthenticated and billable. Also accepts a trailing slash. Requires a loopback client and a localhost, 127.0.0.1, or [::1] Host header. Shares a two-call model limit with POST /model/test. Resolves the adventurer before inference and sends its retrieved details, theme and requested difficulty to the configured Responses model, which must support strict JSON Schema output. Uses one call, a 30-second authentication/inference deadline and a fixed 4096-output-token budget, with no retry or repair. The application validates every proposal independently: exact requested difficulty; minimumLevel from 1 through the retrieved adventurer level; 3-5 bounded objectives; inclusive gold/experience bands easy 20-30/50-75, medium 100-200/200-400, hard 500-800/900-1400, legendary 3000-5000/5000-8000. All numbers must be safe integers. Text lengths count Unicode code points before trimming. Immediately before saving, the adventurer must still exist (otherwise 404) and meet minimumLevel (otherwise 409). Unrelated adventurer edits do not invalidate generation. Failure, refusal, incomplete/invalid output or cancellation saves nothing. Disconnect cancels the call and prevents saving a late result. Success saves once to the shared in-memory quest store with a server-generated UUID/timestamp, status open and aiGenerated true. Generated-only objectives and aiGenerated are read-only and preserved through ordinary PUT; generation reward/level constraints do not change manual CRUD rules. Data resets on restart.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "$ref": "#/components/schemas/QuestGenerationInput" },
+            "example": { "adventurerId": "adventurer-1", "theme": "forest exploration", "difficulty": "easy" }
+          } }
+        },
+        "responses": {
+          "201": {
+            "description": "Validated quest saved with status open and aiGenerated true",
+            "headers": { "Location": { "description": "URL of the saved quest: /quests/{id}", "schema": { "type": "string" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GeneratedQuest" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": {
+            "description": "FORBIDDEN: requires a local client and Host",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": {
+            "description": "Only POST is allowed for local clients",
+            "headers": { "Allow": { "schema": { "type": "string", "enum": ["POST"] } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "409": {
+            "description": "GENERATION_CONFLICT: adventurer level is now below the generated minimum; nothing saved",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "429": {
+            "description": "TOO_MANY_REQUESTS: two model calls are already in progress across both model routes",
+            "headers": { "Retry-After": { "schema": { "type": "string", "example": "1" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": {
+            "description": "CONFIGURATION_ERROR or unexpected INTERNAL_ERROR",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": {
+            "description": "AUTHENTICATION_ERROR, MODEL_REQUEST_REJECTED, MODEL_NOT_FOUND, or INVALID_MODEL_RESPONSE; nothing saved",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "503": {
+            "description": "MODEL_UNAVAILABLE: temporary throttling, server, or connection failure",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "504": {
+            "description": "MODEL_TIMEOUT",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
     "/quests": {
       "get": {
         "summary": "List quests",
@@ -70,7 +128,7 @@
           { "name": "difficulty", "in": "query", "schema": { "type": "string", "enum": ["easy", "medium", "hard", "legendary"] } }
         ],
         "responses": {
-          "200": { "description": "Quests matching all provided filters", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Quest" } } } } },
+          "200": { "description": "Quests matching all provided filters", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/QuestResponse" } } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }
         }
       },
@@ -94,7 +152,7 @@
       "get": {
         "summary": "Get a quest",
         "responses": {
-          "200": { "description": "Quest", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } } },
+          "200": { "description": "Quest", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuestResponse" } } } },
           "404": { "$ref": "#/components/responses/NotFound" }
         }
       },
@@ -102,7 +160,7 @@
         "summary": "Replace all writable quest fields",
         "requestBody": { "$ref": "#/components/requestBodies/Quest" },
         "responses": {
-          "200": { "description": "Updated quest", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } } },
+          "200": { "description": "Updated quest; original createdAt and any generated metadata are preserved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuestResponse" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "413": { "$ref": "#/components/responses/TooLarge" },
@@ -177,6 +235,45 @@
       "Adventurer": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } } }
     },
     "schemas": {
+      "QuestGenerationInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["adventurerId", "theme", "difficulty"],
+        "properties": {
+          "adventurerId": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S", "description": "Existing adventurer ID, including seed IDs; supplied length checked before trimming" },
+          "theme": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S", "description": "Requested theme; supplied Unicode code-point length checked before trimming" },
+          "difficulty": { "type": "string", "enum": ["easy", "medium", "hard", "legendary"] }
+        }
+      },
+      "QuestResponse": {
+        "description": "Manual and seed quests omit both generated fields; generated quests always include both",
+        "oneOf": [
+          { "$ref": "#/components/schemas/Quest" },
+          { "$ref": "#/components/schemas/GeneratedQuest" }
+        ]
+      },
+      "GeneratedQuest": {
+        "description": "Generated metadata survives PUT; ordinary writable fields may subsequently change under manual CRUD rules",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "description", "difficulty", "minimumLevel", "goldReward", "experienceReward", "status", "createdAt", "objectives", "aiGenerated"],
+        "properties": {
+          "id": { "type": "string", "readOnly": true },
+          "title": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+          "description": { "type": "string", "minLength": 1, "maxLength": 5000, "pattern": "\\S" },
+          "difficulty": { "type": "string", "enum": ["easy", "medium", "hard", "legendary"] },
+          "minimumLevel": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "goldReward": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "experienceReward": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "status": { "type": "string", "enum": ["open", "in-progress", "completed"] },
+          "createdAt": { "type": "string", "format": "date-time", "readOnly": true },
+          "objectives": {
+            "type": "array", "minItems": 3, "maxItems": 5, "readOnly": true,
+            "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" }
+          },
+          "aiGenerated": { "type": "boolean", "enum": [true], "readOnly": true }
+        }
+      },
       "ModelTestInput": {
         "type": "object",
         "additionalProperties": false,

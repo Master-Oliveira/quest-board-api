@@ -6,7 +6,8 @@ description: An in-memory Adventurers' Guild REST API with an optional Foundry m
 A small REST API for an Adventurers' Guild, designed for a developer bootcamp.
 Manage quests and adventurers using an in-memory store seeded with 10 fantasy
 quests and 5 adventurers. No database or external services are required for
-the existing API. An optional Azure AI Foundry connection is available for future services.
+CRUD operations. An optional Azure AI Foundry connection powers personalized quest
+generation and a local model-test endpoint.
 Swagger UI assets are installed locally through npm. Data resets whenever the
 process restarts.
 
@@ -22,7 +23,8 @@ npm start
 The API listens at `http://localhost:3000` and accepts connections only from this
 computer (it binds to `127.0.0.1`). Set `PORT` to change the port, for example
 `PORT=4000 npm start` on macOS/Linux. Set `HOST` to bind to another interface;
-`POST /model/test` still accepts only local requests. Stop it with Ctrl+C.
+`POST /model/test` and `POST /quests/generate` still accept only local requests.
+Stop it with Ctrl+C.
 There is no compilation/build step. Run `npm ci` once after cloning to install
 the dependencies from the lockfile.
 
@@ -44,7 +46,7 @@ Tests use Node's built-in runner and isolated servers on ephemeral local ports.
 
 The optional model service uses the OpenAI Responses API through a Microsoft
 Foundry resource's model inference endpoint and Azure Identity's `DefaultAzureCredential`.
-It does not generate quests or change the existing API. You need a Foundry resource and
+CRUD still works without it. You need a Foundry resource and
 a deployed model that supports the Responses API and Microsoft Entra ID
 authentication. Model calls may incur charges.
 
@@ -114,10 +116,12 @@ This endpoint invokes the configured model and incurs usage charges. It is
 unauthenticated and intended only for local testing. It returns 403 unless the
 request comes from a loopback address with a `localhost`, `127.0.0.1`, or `[::1]`
 `Host` header, which also blocks DNS-rebinding requests from web pages. At most
-two model calls run at once; additional requests return 429 with `Retry-After`.
+two model calls run at once, shared with quest generation; additional requests
+return 429 with `Retry-After: 1`.
 If the client disconnects, the server cancels the model call. When
 `AZURE_AI_MODEL_ENDPOINT` is set, the server prints a startup warning about this
-endpoint. Only the caller receives model text; the server does not log it.
+and quest-generation endpoints. Only the caller receives model text; the server
+does not log it.
 
 Errors use the standard envelope:
 
@@ -130,6 +134,88 @@ Errors use the standard envelope:
 
 Configuration and model errors contain sanitized diagnostics; unexpected errors
 return a generic message. Other routes still work without Foundry configuration.
+
+### Generate a personalized quest
+
+**Local-only and billable:** this unauthenticated route sends the selected
+adventurer's retrieved details, theme and difficulty to the configured model.
+The deployment must support both the Responses API and
+[strict JSON Schema structured output](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs).
+Adapter support is tested offline; no particular live deployment's support or
+generated-content quality is guaranteed.
+
+After configuring Foundry and starting the API, use **POST /quests/generate**
+in Swagger, or run this PowerShell example only when you intend to incur usage:
+
+```powershell
+Invoke-RestMethod -Uri 'http://localhost:3000/quests/generate' -Method Post `
+  -ContentType 'application/json' `
+  -Body '{"adventurerId":"adventurer-1","theme":"forest exploration","difficulty":"easy"}'
+```
+
+Both `/quests/generate` and `/quests/generate/` return **201** with
+`Location: /quests/{id}` and the saved quest. An illustrative response (text,
+UUID and timestamp vary) is:
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "title": "Recover the forest crystal",
+  "description": "Follow the ancient trail and return the lost crystal to the guild.",
+  "difficulty": "easy",
+  "minimumLevel": 1,
+  "goldReward": 25,
+  "experienceReward": 60,
+  "objectives": ["Find the trail", "Reach the grove", "Recover the crystal"],
+  "status": "open",
+  "aiGenerated": true,
+  "createdAt": "2026-11-18T00:00:00.000Z"
+}
+```
+
+The request requires exactly `adventurerId`, `theme` and `difficulty`.
+ID and theme must be nonblank strings of at most 200 Unicode code points before
+trimming; difficulty uses the existing enum. An unknown adventurer returns
+404 before any model call. The model proposes a title (up to 200 code points),
+description (up to 5000), the exact requested difficulty, a minimum level,
+rewards and 3-5 nonblank objectives (up to 500 code points each). The application
+checks supplied text lengths before trimming and independently enforces safe
+integers, `1 <= minimumLevel <= adventurer.level`, and these inclusive bands:
+
+| Difficulty | Gold | Experience |
+| --- | --- | --- |
+| `easy` | 20-30 | 50-75 |
+| `medium` | 100-200 | 200-400 |
+| `hard` | 500-800 | 900-1400 |
+| `legendary` | 3000-5000 | 5000-8000 |
+
+These are **generation-only** constraints; manual quest writes retain their
+existing rules. Immediately before saving, the adventurer is checked again.
+Deletion returns `404 NOT_FOUND`; a level below the generated minimum returns
+`409 GENERATION_CONFLICT`. Unrelated adventurer edits do not invalidate generation.
+Either failure saves nothing even though inference may already have incurred charges.
+
+Generation makes one call with a fixed **4096-output-token** budget, the existing
+30-second authentication/inference deadline and no retries, repair or fallback.
+Refusal, incomplete output, invalid JSON or a proposal breaking the rules returns
+a sanitized error without saving. The same model error table above applies;
+invalid proposals use `502 INVALID_MODEL_RESPONSE`.
+
+The same loopback-client/local-Host restriction, JSON-only 64 KiB body policy
+and shared two-call limit apply to both model routes. Other generation methods
+return 405 with `Allow: POST`; saturation returns 429 with `Retry-After: 1`.
+Disconnect cancels generation and prevents saving a late result.
+
+Saved quests use the existing GET/list/filter/PUT/DELETE routes and reset on
+restart. Only generated quests have read-only `objectives` and `aiGenerated`;
+ordinary PUT preserves both and the original timestamp. Do not send these
+metadata fields in manual POST/PUT bodies. The application, not the model,
+assigns the UUID, timestamp, initial `open` status and AI marker.
+
+Each actual generation invocation emits a safe completion event with
+`requestId`, `modelDurationMs`, `outcome` and an optional allowlisted failure
+`code`. It never logs prompts, adventurer details, model output or raw errors.
+Correlation is log-only, not an extra HTTP response header.
 
 ### Troubleshoot model requests
 
@@ -161,7 +247,7 @@ Do not use `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
 ### Use the model service in code
 
-Future application services should receive the `model` service as a dependency
+Application services should receive the `model` service as a dependency
 from the composition root (`createServices` in `src/services.js`) and call
 `await model.complete('Your input')`. It returns text and throws a
 `ModelServiceError` with a safe `code` and message on failure. Pass
@@ -173,6 +259,12 @@ the same abstraction; consumers do not need to import the SDK or handle tokens.
 Foundry configuration is checked only when the model service is first used, so
 the existing API runs without it.
 
+`createServices()` returns `{ guild, model, generateQuest }`. HTTP generation
+calls `generateQuest(input, { signal, requestId })`; its strict output format is
+trusted application configuration, never supplied by an HTTP client. For
+offline generation assertions, inject a fake model and a synchronous safe event
+sink with `createServices({ modelService: fakeModel, logGeneration: event => {} })`.
+
 ## Endpoints
 
 | Method | Path | Success |
@@ -180,6 +272,7 @@ the existing API runs without it.
 | GET | `/quests` | 200, array of quests |
 | GET | `/quests/{id}` | 200, quest |
 | POST | `/quests` | 201, created quest and `Location` header |
+| POST | `/quests/generate` | 201, validated generated quest and `Location` header (local-only, billable) |
 | PUT | `/quests/{id}` | 200, updated quest |
 | DELETE | `/quests/{id}` | 204, no body |
 | GET | `/adventurers` | 200, array of adventurers |
@@ -228,10 +321,11 @@ new IDs are UUIDs.
 
 ### Validation and errors
 
-- POST and PUT require **all writable fields** shown in the examples.
+- Manual POST and PUT require **all writable fields** shown in the CRUD examples.
   PUT replaces those fields; it does not create missing records.
 - `id` and quest `createdAt` are server-generated and cannot be supplied.
   Updating a quest preserves its original creation timestamp.
+- Generated-only `objectives` and `aiGenerated` are also read-only; PUT preserves them.
 - Quest difficulty: `easy`, `medium`, `hard`, `legendary`.
 - Quest status: `open`, `in-progress`, `completed`.
 - Adventurer status: `active`, `inactive`.
@@ -256,11 +350,12 @@ Errors use this format (field details are included for invalid fields):
 }
 ```
 
-Status codes: 400 for invalid input/JSON/filters, 403 for non-local model test
+Status codes: 400 for invalid input/JSON/filters, 403 for non-local model
 requests, 404 for missing routes or records, 405 for unsupported resource methods
-(with `Allow`), 413 for oversized bodies, 415 for unsupported content types,
-429 when too many model test calls are in progress, and 500 for unexpected errors.
-See the model test section for model-specific 5xx codes.
+(with `Allow`), 409 for a generation eligibility conflict, 413 for oversized
+bodies, 415 for unsupported content types, 429 when too many calls across both
+model routes are in progress, and 500 for unexpected errors.
+See the Foundry section for model-specific 5xx codes.
 
 ## OpenAPI documentation
 
@@ -290,6 +385,7 @@ src/
   api/app.js              HTTP routing, JSON parsing, and error responses
   api/docs.js             Swagger UI page and locally served assets
   domain/guild-service.js Business operations
+  domain/quest-generation.js Personalized generation, validation and safe persistence
   domain/validation.js    Input rules and API errors
   data/repository.js      In-memory CRUD implementation
   data/seeds.js           Initial fantasy quests and adventurers
@@ -299,6 +395,7 @@ src/
   server.js               Application entry point
 test/api.test.js           HTTP integration and repository tests
 test/foundry.test.js       Offline model service tests
+test/quest-generation.test.js Offline generation rules, orchestration and telemetry tests
 openapi.json              API contract
 ```
 

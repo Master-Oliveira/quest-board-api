@@ -1,4 +1,5 @@
 const http = require('node:http');
+const { randomUUID } = require('node:crypto');
 const { createServices } = require('../services');
 const { ApiError, validateInput, validateFilters } = require('../domain/validation');
 const { ModelServiceError } = require('../foundry/model-service');
@@ -81,16 +82,18 @@ function createApp({ services = createServices(), env = process.env } = {}) {
   const maxOutputTokens = modelTestMaxOutputTokens(env);
   let activeModelRequests = 0;
 
-  async function testModel(request, response) {
+  async function handleModelRequest(request, response, generation = false) {
     if (!isLocalRequest(request)) {
       request.resume();
-      throw new ApiError(403, 'FORBIDDEN', 'The model test endpoint accepts only local requests.');
+      throw new ApiError(403, 'FORBIDDEN', generation
+        ? 'Quest generation accepts only local requests.'
+        : 'The model test endpoint accepts only local requests.');
     }
     if (request.method !== 'POST') {
       response.setHeader('Allow', 'POST');
       throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed.');
     }
-    const { input } = validateInput('modelTest', await readJson(request));
+    const data = validateInput(generation ? 'questGeneration' : 'modelTest', await readJson(request));
     if (activeModelRequests >= maxConcurrentModelRequests) {
       response.setHeader('Retry-After', '1');
       throw new ApiError(429, 'TOO_MANY_REQUESTS', 'Too many model requests are in progress. Try again shortly.');
@@ -98,10 +101,15 @@ function createApp({ services = createServices(), env = process.env } = {}) {
     const controller = new AbortController();
     const cancel = () => { if (!response.writableFinished) controller.abort(); };
     response.on('close', cancel);
+    if (request.aborted || response.destroyed) controller.abort();
     activeModelRequests++;
     try {
-      const text = await services.model.complete(input, { maxOutputTokens, signal: controller.signal });
-      return send(response, 200, { text });
+      const result = generation
+        ? await services.generateQuest(data, { signal: controller.signal, requestId: randomUUID() })
+        : { text: await services.model.complete(data.input, { maxOutputTokens, signal: controller.signal }) };
+      if (controller.signal.aborted) return undefined;
+      return send(response, generation ? 201 : 200, result,
+        generation ? { Location: `/quests/${result.id}` } : {});
     } catch (error) {
       // The client disconnected, so there is no one to send a response to.
       if (controller.signal.aborted) return undefined;
@@ -120,7 +128,10 @@ function createApp({ services = createServices(), env = process.env } = {}) {
         return send(response, 200, openapi);
       }
       if (url.pathname === '/model/test' || url.pathname === '/model/test/') {
-        return await testModel(request, response);
+        return await handleModelRequest(request, response);
+      }
+      if (url.pathname === '/quests/generate' || url.pathname === '/quests/generate/') {
+        return await handleModelRequest(request, response, true);
       }
       const match = url.pathname.match(/^\/(quests|adventurers)(?:\/([^/]+))?\/?$/);
       if (!match) throw new ApiError(404, 'NOT_FOUND', 'Route not found.');
@@ -146,6 +157,7 @@ function createApp({ services = createServices(), env = process.env } = {}) {
       service.delete(id);
       return send(response, 204);
     } catch (error) {
+      if (response.destroyed) return;
       if (error instanceof ModelServiceError && Object.hasOwn(modelErrorStatus, error.code)) {
         error = new ApiError(modelErrorStatus[error.code], error.code, error.message);
       }

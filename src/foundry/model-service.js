@@ -57,6 +57,7 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
           client.responses.create({
             model, input,
             ...(options.maxOutputTokens === undefined ? {} : { max_output_tokens: options.maxOutputTokens }),
+            ...(options.outputFormat === undefined ? {} : { text: { format: options.outputFormat } }),
           }, { signal: controller.signal }),
           new Promise((resolve, reject) => {
             timer = setTimeout(() => {
@@ -100,7 +101,11 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
         clearTimeout(timer);
         if (cancel) signal?.removeEventListener('abort', cancel);
       }
-      if (response?.status !== 'completed' || typeof response.output_text !== 'string' || !response.output_text.trim()) {
+      const refused = Array.isArray(response?.output) && response.output.some(item =>
+        item?.type === 'message' && Array.isArray(item.content)
+        && item.content.some(part => part?.type === 'refusal'));
+      if (refused || response?.status !== 'completed'
+        || typeof response.output_text !== 'string' || !response.output_text.trim()) {
         throw new ModelServiceError('INVALID_MODEL_RESPONSE', 'The Foundry model returned an incomplete or empty response.');
       }
       return response.output_text;

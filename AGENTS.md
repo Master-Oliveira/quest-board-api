@@ -8,8 +8,8 @@ description: Architecture, development commands, change boundaries, and completi
 An Adventurers' Guild REST API for a developer bootcamp. It manages quests and
 adventurers in memory, starting with 10 quests and 5 adventurers. State resets on
 restart. The existing API needs no database, Azure credentials, or external
-services. An optional Microsoft Foundry model service is available for future
-consumers and the local-only `POST /model/test` endpoint; it does not generate quests.
+services for CRUD. An optional Microsoft Foundry model service powers local-only
+`POST /quests/generate` and `POST /model/test`.
 
 Use [README.md](./README.md) for usage and
 [openapi.json](./openapi.json) for the HTTP contract. Follow the
@@ -26,13 +26,16 @@ changes. If scope or an intended contract change is unclear, ask before editing.
 Keep HTTP handling, business rules, storage, and external SDKs separate:
 
 * [src/api](./src/api) owns routing, JSON parsing, HTTP errors, and local Swagger
-  UI, including the model test route. Extend the HTTP application through
+  UI, including both protected model routes. Extend the HTTP application through
   `createApp({ services })`.
 * [src/services.js](./src/services.js) is the composition root. Each
   `createServices()` call creates fresh seeded repositories and returns
-  `{ guild, model }`.
+  `{ guild, model, generateQuest }`.
 * [src/domain](./src/domain) owns CRUD business rules, timestamps, input
   validation, quest filters, and `ApiError`.
+  [src/domain/quest-generation.js](./src/domain/quest-generation.js) orchestrates
+  one strict model proposal, independent rule validation, current-adventurer
+  revalidation, safe telemetry and a synchronous write to the shared repository.
 * [src/data](./src/data) owns seed creation and synchronous repositories with
   `list`, `get`, `create`, `update`, and `delete` operations.
 * [src/foundry/model-service.js](./src/foundry/model-service.js) encapsulates
@@ -42,6 +45,7 @@ Keep HTTP handling, business rules, storage, and external SDKs separate:
 Pass `services.model` to production model consumers. In tests, substitute it
 through `createServices({ modelService: fakeModel })`. See the README for the
 full file inventory.
+Generation tests may additionally inject a synchronous `logGeneration` sink.
 
 ## Build, run, and test
 
@@ -62,6 +66,7 @@ Start the application with `npm start`. Run focused offline tests as needed:
 ```sh
 node --test test/api.test.js
 node --test test/foundry.test.js
+node --test test/quest-generation.test.js
 node --test --test-name-pattern="CRUD" test/api.test.js
 ```
 
@@ -115,12 +120,13 @@ validation.
   Do not read, overwrite, or copy local `.env` values into code or documentation.
 * Do not introduce persistence, authentication, deployment infrastructure,
   frameworks, or additional model endpoints unless the task calls for them.
-  Keep `POST /model/test` local-only: it is unauthenticated, invokes billable
-  inference with at most 5000 input code points and a bounded output-token
-  limit (`MODEL_TEST_MAX_OUTPUT_TOKENS`, default 512, 16-4096), accepts only
-  loopback clients with a local `Host` header, allows at most two concurrent
-  model calls, and cancels the model call when the client disconnects. The
-  server binds to `127.0.0.1` unless `HOST` is set.
+  Keep both model routes local-only: they are unauthenticated and billable,
+  accept only loopback clients with a local `Host` header, share at most two
+  concurrent model calls per app, and cancel when the client disconnects.
+  `POST /model/test` retains its 5000-input-code-point limit and configurable
+  output budget (`MODEL_TEST_MAX_OUTPUT_TOKENS`, default 512, 16-4096).
+  Generation has a fixed 4096-output-token budget. The server binds to
+  `127.0.0.1` unless `HOST` is set.
 
 ## Security constraints
 
@@ -168,6 +174,20 @@ Unless the requested behavior explicitly changes them:
 * Keep existing CRUD routes usable without Foundry configuration, login, or
   network access. Model calls return completed, non-empty text or throw a
   sanitized error, never a success-shaped fallback.
+* Generation validates exactly `adventurerId`, `theme`, `difficulty` before
+  inference. Independently validate the exact proposal shape, requested
+  difficulty, generation-only reward bands, level bounds and 3-5 objectives.
+  Do not retry, repair or save invalid output. See the README for numeric bounds.
+* Immediately before synchronous generation save, re-read the adventurer:
+  missing returns 404; level below the generated minimum returns
+  `409 GENERATION_CONFLICT`; neither saves. Check cancellation before writing
+  and perform no await between the final checks and persistence.
+* Only generated records have `objectives` and `aiGenerated: true`. Preserve
+  both through PUT without making them writable or adding them to seed/manual
+  records. Nested objective arrays must remain defensively copied.
+* Generation logs contain only correlation ID, actual model duration, final
+  outcome and optional allowlisted error code. Never log task data or model
+  content; a telemetry sink failure must not invalidate a saved quest.
 
 ## Definition of Done
 
