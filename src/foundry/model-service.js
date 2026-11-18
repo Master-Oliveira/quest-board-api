@@ -57,6 +57,13 @@ function createFoundryModelService({ env = process.env, createClient = defaultCl
           client.responses.create({
             model, input,
             ...(options.maxOutputTokens === undefined ? {} : { max_output_tokens: options.maxOutputTokens }),
+            ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
+            ...(options.jsonSchema === undefined ? {} : { text: { format: {
+              type: 'json_schema',
+              name: options.jsonSchema.name,
+              schema: options.jsonSchema.schema,
+              strict: true,
+            } } }),
           }, { signal: controller.signal }),
           new Promise((resolve, reject) => {
             timer = setTimeout(() => {

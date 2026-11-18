@@ -3,7 +3,7 @@
   "info": {
     "title": "Adventurers' Guild API",
     "version": "1.0.0",
-    "description": "In-memory quest and adventurer management. All writable fields are required for POST and PUT. PUT replaces writable fields; id and createdAt are server-managed. Data resets on restart. JSON request bodies are limited to 64 KiB."
+    "description": "In-memory quest and adventurer management. All writable fields are required for POST and PUT. PUT replaces writable fields; id, createdAt, objectives, and aiGenerated are server-managed. Data resets on restart. JSON request bodies are limited to 64 KiB."
   },
   "servers": [{ "url": "/" }],
   "paths": {
@@ -86,6 +86,79 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "413": { "$ref": "#/components/responses/TooLarge" },
           "415": { "$ref": "#/components/responses/UnsupportedMediaType" }
+        }
+      }
+    },
+    "/quests/generate": {
+      "post": {
+        "summary": "Generate an AI quest for an adventurer",
+        "description": "Local development only: unauthenticated, billable Foundry model call. Requests must come from a loopback address with a localhost, 127.0.0.1, or [::1] Host header, and share the two-call model concurrency limit with POST /model/test. The application loads the adventurer, asks the model for a structured quest, and enforces the guild rules before saving: difficulty matches the request; minimumLevel is between max(1, adventurer level - 5) and the adventurer level; rewards fall in the difficulty band (easy gold 10-60 / XP 25-150, medium 75-300 / 150-600, hard 400-1200 / 700-2000, legendary 2000-8000 / 4000-12000); 3 to 5 objectives. The quest is saved with status open and aiGenerated true, and then behaves like any other quest. Nothing is saved on failure. Invalid bodies and unknown adventurers are rejected before the concurrency limit. Output is limited to 2048 tokens by default (QUEST_GENERATION_MAX_OUTPUT_TOKENS, 256-16384). Uses a 30-second deadline with no retries; the model call is cancelled if the client disconnects. A valid X-Request-Id header (1-128 letters, digits, '.', '_', or '-') is reused; otherwise a UUID is generated.",
+        "parameters": [
+          { "name": "X-Request-Id", "in": "header", "required": false, "schema": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" }, "description": "Optional correlation ID echoed in the response and written to logs" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "$ref": "#/components/schemas/QuestGenerationRequest" },
+            "example": { "adventurerId": "adventurer-1", "theme": "haunted lighthouse", "difficulty": "medium" }
+          } }
+        },
+        "responses": {
+          "201": {
+            "description": "Generated and saved quest",
+            "headers": {
+              "Location": { "description": "URL of the created quest", "schema": { "type": "string" } },
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": {
+              "schema": { "$ref": "#/components/schemas/Quest" },
+              "example": {
+                "id": "6f1c2b9e-5d1a-4f7e-9c3b-2a8d7e6f5c4b", "title": "The Lantern Wraith",
+                "description": "A restless spirit has darkened the coastal lighthouse.",
+                "difficulty": "medium", "minimumLevel": 4, "goldReward": 150, "experienceReward": 300,
+                "status": "open", "createdAt": "2026-11-17T22:40:00.000Z",
+                "objectives": ["Reach the lighthouse", "Relight the lantern", "Banish the wraith"],
+                "aiGenerated": true
+              }
+            } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": {
+            "description": "FORBIDDEN: the request did not come from a local client and Host",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "NOT_FOUND: unknown adventurerId",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "405": {
+            "description": "Only POST is allowed",
+            "headers": { "Allow": { "schema": { "type": "string", "enum": ["POST"] } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "429": {
+            "description": "TOO_MANY_REQUESTS: two model calls are already in progress",
+            "headers": { "Retry-After": { "schema": { "type": "string", "example": "1" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": {
+            "description": "CONFIGURATION_ERROR or unexpected INTERNAL_ERROR",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": {
+            "description": "INVALID_MODEL_RESPONSE (empty, incomplete, or malformed output), INVALID_GENERATED_QUEST (output breaks guild rules; details list the fields), AUTHENTICATION_ERROR, MODEL_REQUEST_REJECTED, or MODEL_NOT_FOUND",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "503": {
+            "description": "MODEL_UNAVAILABLE: temporary throttling, server, or connection failure",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "504": {
+            "description": "MODEL_TIMEOUT",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
         }
       }
     },
@@ -172,6 +245,9 @@
     "parameters": {
       "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Opaque resource ID (seed IDs or generated UUIDs)" }
     },
+    "headers": {
+      "RequestId": { "description": "Correlation ID for this request (client-supplied if valid, otherwise a generated UUID)", "schema": { "type": "string" } }
+    },
     "requestBodies": {
       "Quest": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Quest" } } } },
       "Adventurer": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Adventurer" } } } }
@@ -193,10 +269,20 @@
           "text": { "type": "string", "minLength": 1, "pattern": "\\S" }
         }
       },
+      "QuestGenerationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["adventurerId", "theme", "difficulty"],
+        "properties": {
+          "adventurerId": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+          "theme": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+          "difficulty": { "type": "string", "enum": ["easy", "medium", "hard", "legendary"] }
+        }
+      },
       "Quest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "description", "difficulty", "minimumLevel", "goldReward", "experienceReward", "status", "createdAt"],
+        "required": ["id", "title", "description", "difficulty", "minimumLevel", "goldReward", "experienceReward", "status", "createdAt", "objectives", "aiGenerated"],
         "properties": {
           "id": { "type": "string", "readOnly": true },
           "title": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
@@ -206,7 +292,9 @@
           "goldReward": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "experienceReward": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "status": { "type": "string", "enum": ["open", "in-progress", "completed"] },
-          "createdAt": { "type": "string", "format": "date-time", "readOnly": true }
+          "createdAt": { "type": "string", "format": "date-time", "readOnly": true },
+          "objectives": { "type": "array", "maxItems": 5, "readOnly": true, "description": "AI-generated quests have 3 to 5 objectives; other quests have none", "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+          "aiGenerated": { "type": "boolean", "readOnly": true, "description": "True when created by POST /quests/generate" }
         }
       },
       "Adventurer": {

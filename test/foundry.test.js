@@ -41,6 +41,19 @@ test('completion abstraction sends model and input and returns text', async () =
   assert.equal(createServices({ modelService: service }).model, service);
 });
 
+test('structured output options send instructions and a strict JSON Schema format', async () => {
+  const { service, calls } = fakeService({ status: 'completed', output_text: '{"ok":true}' });
+  const schema = { type: 'object', additionalProperties: false, required: ['ok'],
+    properties: { ok: { type: 'boolean' } } };
+  assert.equal(await service.complete('Data', {
+    instructions: 'Follow the rules.', jsonSchema: { name: 'result', schema }, maxOutputTokens: 64,
+  }), '{"ok":true}');
+  assert.deepEqual(calls[0].request, {
+    model: 'deployment', input: 'Data', max_output_tokens: 64, instructions: 'Follow the rules.',
+    text: { format: { type: 'json_schema', name: 'result', schema, strict: true } },
+  });
+});
+
 test('configuration is lazy, required, and rejects unsafe endpoint URLs', async () => {
   const withUserInfo = new URL('https://example.test');
   withUserInfo.username = 'user';

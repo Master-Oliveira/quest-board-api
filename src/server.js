@@ -15,6 +15,6 @@ server.listen(port, host, () => {
   const displayHost = address.family === 'IPv6' ? `[${address.address}]` : address.address;
   console.log(`Guild API listening on http://${displayHost}:${address.port}`);
   if (process.env.AZURE_AI_MODEL_ENDPOINT?.trim()) {
-    console.warn('Warning: POST /model/test is unauthenticated and makes billable model calls. It accepts only local requests.');
+    console.warn('Warning: POST /model/test and POST /quests/generate are unauthenticated and make billable model calls. They accept only local requests.');
   }
 });

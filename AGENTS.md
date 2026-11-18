@@ -8,8 +8,8 @@ description: Architecture, development commands, change boundaries, and completi
 An Adventurers' Guild REST API for a developer bootcamp. It manages quests and
 adventurers in memory, starting with 10 quests and 5 adventurers. State resets on
 restart. The existing API needs no database, Azure credentials, or external
-services. An optional Microsoft Foundry model service is available for future
-consumers and the local-only `POST /model/test` endpoint; it does not generate quests.
+services. An optional Microsoft Foundry model service powers the local-only
+`POST /quests/generate` (AI Quest Master) and `POST /model/test` endpoints.
 
 Use [README.md](./README.md) for usage and
 [openapi.json](./openapi.json) for the HTTP contract. Follow the
@@ -26,13 +26,17 @@ changes. If scope or an intended contract change is unclear, ask before editing.
 Keep HTTP handling, business rules, storage, and external SDKs separate:
 
 * [src/api](./src/api) owns routing, JSON parsing, HTTP errors, and local Swagger
-  UI, including the model test route. Extend the HTTP application through
+  UI, including the model routes, their shared local-only/concurrency guard, and
+  `X-Request-Id` handling. Extend the HTTP application through
   `createApp({ services })`.
 * [src/services.js](./src/services.js) is the composition root. Each
   `createServices()` call creates fresh seeded repositories and returns
-  `{ guild, model }`.
+  `{ guild, model, questGenerator }`.
 * [src/domain](./src/domain) owns CRUD business rules, timestamps, input
   validation, quest filters, and `ApiError`.
+  [quest-generator.js](./src/domain/quest-generator.js) owns the AI quest
+  prompt, structured-output parsing, guild rules (reward bands, level window,
+  objective count), and sanitized generation logs.
 * [src/data](./src/data) owns seed creation and synchronous repositories with
   `list`, `get`, `create`, `update`, and `delete` operations.
 * [src/foundry/model-service.js](./src/foundry/model-service.js) encapsulates
@@ -40,7 +44,7 @@ Keep HTTP handling, business rules, storage, and external SDKs separate:
   domain consumers should not import those SDKs.
 
 Pass `services.model` to production model consumers. In tests, substitute it
-through `createServices({ modelService: fakeModel })`. See the README for the
+through `createServices({ modelService: fakeModel, logger: fakeLogger })`. See the README for the
 full file inventory.
 
 ## Build, run, and test
@@ -62,6 +66,7 @@ Start the application with `npm start`. Run focused offline tests as needed:
 ```sh
 node --test test/api.test.js
 node --test test/foundry.test.js
+node --test test/quest-generator.test.js
 node --test --test-name-pattern="CRUD" test/api.test.js
 ```
 
@@ -151,7 +156,8 @@ validation.
 Unless the requested behavior explicitly changes them:
 
 * POST and PUT require every writable field. PUT replaces writable fields,
-  does not upsert, and preserves quest `createdAt`. IDs are server-generated
+  does not upsert, and preserves the server-managed quest fields `createdAt`,
+  `objectives`, and `aiGenerated`. IDs are server-generated
   UUIDs for new records; seed IDs are intentionally different.
 * Text limits count Unicode code points, not UTF-16 code units. Validation
   checks the supplied length before trimming; stored strings are trimmed.
@@ -168,6 +174,10 @@ Unless the requested behavior explicitly changes them:
 * Keep existing CRUD routes usable without Foundry configuration, login, or
   network access. Model calls return completed, non-empty text or throw a
   sanitized error, never a success-shaped fallback.
+* The application, not the model, enforces generated-quest rules. Generated
+  quests are saved only after every rule passes; failures persist nothing and
+  are never repaired or retried automatically. Generation logs carry the
+  request ID, model duration, and outcome, never theme, prompt, or model output.
 
 ## Definition of Done
 

@@ -250,6 +250,11 @@ test('repository does not expose mutable internal records', () => {
   updated.title = 'mutated update';
   assert.equal(repository.get(created.id).title, quest.title);
   assert.equal(repository.update('missing', quest), undefined);
+  const withObjectives = repository.create({ ...quest, objectives: ['Find the cave'] });
+  withObjectives.objectives.push('mutated create');
+  repository.get(withObjectives.id).objectives.push('mutated get');
+  repository.list().find(item => item.id === withObjectives.id).objectives.push('mutated list');
+  assert.deepEqual(repository.get(withObjectives.id).objectives, ['Find the cave']);
 });
 
 test('model test returns model text and forwards validated input with a bounded output', async t => {
@@ -492,4 +497,195 @@ test('Swagger UI serves local assets and loads the same-origin OpenAPI specifica
     assert.equal((await response.json()).error.code, 'NOT_FOUND');
   }
   assert.equal((await request('/docs', 'POST', {})).status, 404);
+});
+
+const generatedQuest = {
+  title: 'The Lantern Wraith',
+  description: 'A restless spirit has darkened the coastal lighthouse.',
+  difficulty: 'medium', minimumLevel: 4, goldReward: 150, experienceReward: 300,
+  objectives: ['Reach the lighthouse', 'Relight the lantern', 'Banish the wraith'],
+};
+const generationRequest = { adventurerId: 'adventurer-1', theme: 'haunted lighthouse', difficulty: 'medium' };
+
+function generationServices(output) {
+  const calls = [];
+  const logs = [];
+  const services = createServices({
+    modelService: { complete: async (...args) => {
+      calls.push(args);
+      const value = typeof output === 'function' ? await output(...args) : output;
+      if (value instanceof Error) throw value;
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    } },
+    logger: { info: entry => logs.push(entry), error: entry => logs.push(entry) },
+  });
+  return { services, calls, logs };
+}
+
+test('quest generation creates an AI quest that behaves like other quests', async t => {
+  const { services, calls, logs } = generationServices(generatedQuest);
+  const request = await setup(t, { services });
+  const created = await request('/quests/generate', 'POST', generationRequest, { 'X-Request-Id': 'trace-123' });
+  assert.equal(created.status, 201);
+  assert.equal(created.headers.get('x-request-id'), 'trace-123');
+  const quest = await created.json();
+  assert.equal(created.headers.get('location'), `/quests/${quest.id}`);
+  assert.deepEqual(quest, {
+    ...generatedQuest, id: quest.id, status: 'open', createdAt: quest.createdAt, aiGenerated: true,
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0][1].signal instanceof AbortSignal);
+  assert.equal(logs[0].requestId, 'trace-123');
+  assert.equal(logs[0].outcome, 'succeeded');
+
+  assert.deepEqual(await (await request(`/quests/${quest.id}`)).json(), quest);
+  const open = await (await request('/quests?status=open&difficulty=medium')).json();
+  assert.ok(open.some(item => item.id === quest.id));
+  const replacement = { title: 'Renamed', description: 'Updated.', difficulty: 'hard', minimumLevel: 5,
+    goldReward: 500, experienceReward: 900, status: 'in-progress' };
+  const updated = await request(`/quests/${quest.id}`, 'PUT', replacement);
+  assert.equal(updated.status, 200);
+  assert.deepEqual(await updated.json(), { ...quest, ...replacement });
+  for (const field of ['objectives', 'aiGenerated']) {
+    const rejected = await request(`/quests/${quest.id}`, 'PUT', { ...replacement, [field]: quest[field] });
+    assert.equal(rejected.status, 400);
+  }
+  assert.equal((await request(`/quests/${quest.id}`, 'DELETE')).status, 204);
+  assert.equal((await request(`/quests/${quest.id}`)).status, 404);
+});
+
+test('manual and seed quests expose empty objectives and are not AI generated', async t => {
+  const request = await setup(t);
+  const seeds = await (await request('/quests')).json();
+  assert.ok(seeds.every(item => item.aiGenerated === false && Array.isArray(item.objectives)
+    && item.objectives.length === 0));
+  const created = await (await request('/quests', 'POST', quest)).json();
+  assert.equal(created.aiGenerated, false);
+  assert.deepEqual(created.objectives, []);
+  for (const extra of [{ objectives: ['Sneak in'] }, { aiGenerated: true }]) {
+    const response = await request('/quests', 'POST', { ...quest, ...extra });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
+  }
+});
+
+test('quest generation rejects unknown adventurers and invalid requests without calling the model', async t => {
+  const { services, calls } = generationServices(generatedQuest);
+  const request = await setup(t, { services });
+  const count = async () => (await (await request('/quests')).json()).length;
+  const before = await count();
+  for (const [body, status, code] of [
+    [{ ...generationRequest, adventurerId: 'adventurer-404' }, 404, 'NOT_FOUND'],
+    [{ ...generationRequest, difficulty: 'impossible' }, 400, 'VALIDATION_ERROR'],
+    [{ ...generationRequest, extra: true }, 400, 'VALIDATION_ERROR'],
+    [[], 400, 'VALIDATION_ERROR'],
+  ]) {
+    const response = await request('/quests/generate', 'POST', body);
+    assert.equal(response.status, status);
+    assert.match(response.headers.get('x-request-id'), /^[0-9a-f-]{36}$/);
+    assert.equal((await response.json()).error.code, code);
+  }
+  const wrongType = await request('/quests/generate', 'POST', generationRequest, { 'Content-Type': 'text/plain' });
+  assert.equal(wrongType.status, 415);
+  const getResponse = await request('/quests/generate/');
+  assert.equal(getResponse.status, 405);
+  assert.equal(getResponse.headers.get('allow'), 'POST');
+  assert.equal(calls.length, 0);
+  assert.equal(await count(), before);
+});
+
+test('quest generation maps model and output failures to API errors without persisting', async t => {
+  let output;
+  const { services } = generationServices(() => output);
+  const request = await setup(t, { services });
+  const count = async () => (await (await request('/quests')).json()).length;
+  const before = await count();
+  for (const [value, status, code] of [
+    [new ModelServiceError('MODEL_UNAVAILABLE', 'The Foundry model is temporarily unavailable. Try again.'), 503, 'MODEL_UNAVAILABLE'],
+    [new ModelServiceError('MODEL_TIMEOUT', 'The Foundry model request timed out. Try again.'), 504, 'MODEL_TIMEOUT'],
+    [new ModelServiceError('CONFIGURATION_ERROR', 'Set the model variables.'), 500, 'CONFIGURATION_ERROR'],
+    ['{"title":', 502, 'INVALID_MODEL_RESPONSE'],
+    [{ ...generatedQuest, objectives: ['Only one'] }, 502, 'INVALID_GENERATED_QUEST'],
+    [{ ...generatedQuest, goldReward: -10 }, 502, 'INVALID_GENERATED_QUEST'],
+    [new Error('private SDK details'), 500, 'INTERNAL_ERROR'],
+  ]) {
+    output = value;
+    const response = await request('/quests/generate', 'POST', generationRequest, { 'X-Request-Id': 'bad id!' });
+    assert.equal(response.status, status);
+    assert.match(response.headers.get('x-request-id'), /^[0-9a-f-]{36}$/);
+    const body = await response.json();
+    assert.equal(body.error.code, code);
+    assert.doesNotMatch(JSON.stringify(body), /private SDK details/);
+    if (code === 'INVALID_GENERATED_QUEST') assert.ok(body.error.details.length > 0);
+  }
+  assert.equal(await count(), before);
+});
+
+test('quest generation is local-only and shares the model concurrency limit', async t => {
+  const pending = [];
+  const { services } = generationServices(() => new Promise(resolve => pending.push(resolve)));
+  const server = createApp({ services });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const remote = await new Promise((resolve, reject) => {
+    const body = JSON.stringify(generationRequest);
+    const outgoing = http.request(`${base}/quests/generate`, {
+      method: 'POST',
+      headers: { Host: 'evil.example', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, incoming => { incoming.resume(); incoming.on('end', () => resolve(incoming.statusCode)); });
+    outgoing.on('error', reject);
+    outgoing.end(body);
+  });
+  assert.equal(remote, 403);
+  assert.equal(pending.length, 0);
+
+  const post = (path, body) => fetch(`${base}${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const first = post('/model/test', { input: 'One' });
+  const second = post('/model/test', { input: 'Two' });
+  while (pending.length < 2) await new Promise(resolve => setImmediate(resolve));
+  const busy = await post('/quests/generate', generationRequest);
+  assert.equal(busy.status, 429);
+  assert.equal(busy.headers.get('retry-after'), '1');
+  pending.forEach(resolve => resolve('Done'));
+  await Promise.all([first, second]);
+});
+
+test('OpenAPI describes quest generation and AI quest fields', () => {
+  const generate = specification.paths['/quests/generate'].post;
+  assert.deepEqual(generate.requestBody.content['application/json'].schema,
+    { $ref: '#/components/schemas/QuestGenerationRequest' });
+  assert.deepEqual(generate.responses['201'].content['application/json'].schema,
+    { $ref: '#/components/schemas/Quest' });
+  for (const status of ['400', '403', '404', '405', '429', '500', '502', '503', '504']) {
+    assert.ok(generate.responses[status], `missing ${status}`);
+  }
+  const questSchema = specification.components.schemas.Quest;
+  assert.ok(questSchema.required.includes('objectives') && questSchema.required.includes('aiGenerated'));
+  assert.equal(questSchema.properties.objectives.readOnly, true);
+  assert.equal(questSchema.properties.aiGenerated.readOnly, true);
+});
+
+test('invalid quest generation requests get 400 or 404 even when the model limit is reached', async t => {
+  const pending = [];
+  const { services } = generationServices(() => new Promise(resolve => pending.push(resolve)));
+  const request = await setup(t, { services });
+  const first = request('/model/test', 'POST', { input: 'One' });
+  const second = request('/model/test', 'POST', { input: 'Two' });
+  while (pending.length < 2) await new Promise(resolve => setImmediate(resolve));
+  for (const [body, status, code] of [
+    [{ ...generationRequest, difficulty: 'impossible' }, 400, 'VALIDATION_ERROR'],
+    [{ ...generationRequest, adventurerId: 'adventurer-404' }, 404, 'NOT_FOUND'],
+    [generationRequest, 429, 'TOO_MANY_REQUESTS'],
+  ]) {
+    const response = await request('/quests/generate', 'POST', body);
+    assert.equal(response.status, status);
+    assert.equal((await response.json()).error.code, code);
+  }
+  assert.equal(pending.length, 2);
+  pending.forEach(resolve => resolve('Done'));
+  await Promise.all([first, second]);
 });

@@ -1,4 +1,5 @@
 const http = require('node:http');
+const { randomUUID } = require('node:crypto');
 const { createServices } = require('../services');
 const { ApiError, validateInput, validateFilters } = require('../domain/validation');
 const { ModelServiceError } = require('../foundry/model-service');
@@ -56,6 +57,13 @@ const modelErrorStatus = {
 const loopbackAddresses = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const localHostnames = new Set(['localhost', '127.0.0.1', '[::1]']);
 const maxConcurrentModelRequests = 2;
+const requestIdPattern = /^[A-Za-z0-9._-]{1,128}$/;
+
+// Reuses a safe client-supplied correlation ID; anything else is replaced to prevent log injection.
+function requestIdFor(request) {
+  const id = request.headers['x-request-id'];
+  return typeof id === 'string' && requestIdPattern.test(id) ? id : randomUUID();
+}
 
 function modelTestMaxOutputTokens(env) {
   const value = env.MODEL_TEST_MAX_OUTPUT_TOKENS?.trim();
@@ -81,16 +89,18 @@ function createApp({ services = createServices(), env = process.env } = {}) {
   const maxOutputTokens = modelTestMaxOutputTokens(env);
   let activeModelRequests = 0;
 
-  async function testModel(request, response) {
+  // Shared guard for billable model endpoints: local-only, POST-only, bounded concurrency,
+  // and cancellation of the model call when the client disconnects.
+  async function handleModelRequest(request, response, { label, validate, run }) {
     if (!isLocalRequest(request)) {
       request.resume();
-      throw new ApiError(403, 'FORBIDDEN', 'The model test endpoint accepts only local requests.');
+      throw new ApiError(403, 'FORBIDDEN', `The ${label} endpoint accepts only local requests.`);
     }
     if (request.method !== 'POST') {
       response.setHeader('Allow', 'POST');
       throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed.');
     }
-    const { input } = validateInput('modelTest', await readJson(request));
+    const body = validate(await readJson(request));
     if (activeModelRequests >= maxConcurrentModelRequests) {
       response.setHeader('Retry-After', '1');
       throw new ApiError(429, 'TOO_MANY_REQUESTS', 'Too many model requests are in progress. Try again shortly.');
@@ -100,8 +110,7 @@ function createApp({ services = createServices(), env = process.env } = {}) {
     response.on('close', cancel);
     activeModelRequests++;
     try {
-      const text = await services.model.complete(input, { maxOutputTokens, signal: controller.signal });
-      return send(response, 200, { text });
+      return await run(body, controller.signal);
     } catch (error) {
       // The client disconnected, so there is no one to send a response to.
       if (controller.signal.aborted) return undefined;
@@ -110,6 +119,31 @@ function createApp({ services = createServices(), env = process.env } = {}) {
       activeModelRequests--;
       response.off('close', cancel);
     }
+  }
+
+  function testModel(request, response) {
+    return handleModelRequest(request, response, {
+      label: 'model test',
+      validate: body => validateInput('modelTest', body),
+      run: async ({ input }, signal) => {
+        const text = await services.model.complete(input, { maxOutputTokens, signal });
+        return send(response, 200, { text });
+      },
+    });
+  }
+
+  function generateQuest(request, response) {
+    const requestId = requestIdFor(request);
+    response.setHeader('X-Request-Id', requestId);
+    return handleModelRequest(request, response, {
+      label: 'quest generation',
+      // Validates and loads the adventurer before the concurrency check, so invalid requests get 400/404, not 429.
+      validate: body => services.questGenerator.prepare(body, { requestId }),
+      run: async (prepared, signal) => {
+        const quest = await services.questGenerator.run(prepared, { signal });
+        return send(response, 201, quest, { Location: `/quests/${quest.id}` });
+      },
+    });
   }
 
   return http.createServer(async (request, response) => {
@@ -121,6 +155,9 @@ function createApp({ services = createServices(), env = process.env } = {}) {
       }
       if (url.pathname === '/model/test' || url.pathname === '/model/test/') {
         return await testModel(request, response);
+      }
+      if (url.pathname === '/quests/generate' || url.pathname === '/quests/generate/') {
+        return await generateQuest(request, response);
       }
       const match = url.pathname.match(/^\/(quests|adventurers)(?:\/([^/]+))?\/?$/);
       if (!match) throw new ApiError(404, 'NOT_FOUND', 'Route not found.');

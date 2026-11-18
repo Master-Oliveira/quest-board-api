@@ -17,6 +17,11 @@ const schemas = {
   modelTest: {
     input: text(5000),
   },
+  questGeneration: {
+    adventurerId: text(200),
+    theme: text(200),
+    difficulty: member(difficulties),
+  },
   quests: {
     title: text(200),
     description: text(5000),
@@ -71,4 +76,4 @@ function validateFilters(params) {
   return filters;
 }
 
-module.exports = { ApiError, validateInput, validateFilters };
+module.exports = { ApiError, validateInput, validateFilters, difficulties, isText: text };
